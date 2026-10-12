@@ -13,6 +13,12 @@ npm run dev
 
 Počítač i mobil připojte ke stejné Wi-Fi síti. Na počítači spusťte `ipconfig` a najděte jeho IPv4 adresu v části aktivního síťového adaptéru. V mobilním prohlížeči otevřete `http://ADRESA-POČÍTAČE:5173` (například `http://192.168.1.25:5173`). Nepoužívejte `localhost` — ten na mobilu označuje samotný telefon. Ve vývojovém režimu jsou požadavky z privátní Wi-Fi sítě povolené i při `APP_BASE_URL=http://localhost:5173`; v produkci musí adresa aplikace přesně odpovídat `APP_BASE_URL`. Pokud se stránka neotevře, povolte Node.js ve Windows Firewallu pro soukromé sítě.
 
+### Veřejný přístup přes Render
+
+Pro přístup zákazníků z libovolné sítě je potřeba nasadit frontend i API na veřejný HTTPS server. Projekt obsahuje Blueprint `render.yaml`: v Renderu vytvořte nový Blueprint ze svého GitHub repozitáře `ravlmen/taxi-appp` a nechte vytvořit službu `taxi-koblizek`. Služba používá placený plán a trvalý disk, aby se SQLite databáze s jízdami a nastavením neztratila při restartu. Render automaticky nastaví veřejnou URL aplikace; API povolí pouze požadavky ze stejné adresy.
+
+Před spuštěním zákaznického přihlašování nastavte v Render Dashboardu proměnné `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` a `TWILIO_FROM_NUMBER` s aktivním Twilio účtem. Pro přihlášení majitele nastavte `DRIVER_3_USERNAME` a `DRIVER_3_PASSWORD` (alespoň 12 znaků); heslo vkládejte jen do nastavení služby, nikdy do Gitu. Bez Twilio SMS se v produkci zákazník nepřihlásí. Pro platby kartou lze navíc nastavit `STRIPE_SECRET_KEY`. Po změně tajných proměnných službu znovu nasaďte. Veřejné nasazení není dostupné, dokud Blueprint nevytvoříte a nenastavíte potřebné účty a proměnné.
+
 ## Platba kartou
 
 K placení kartou se používá Stripe Checkout. Údaje o kartě se zadávají na zabezpečené stránce Stripe; aplikace je nezpracovává ani neukládá. Po potvrzení objednávky se vypočte cena na serveru, zákazník zaplatí ihned a server ověří stav platby u Stripe před uložením jízdy do databáze a zpřístupněním řidičům.

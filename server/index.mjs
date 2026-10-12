@@ -21,7 +21,7 @@ import { createTwilioSmsSender } from './sms.mjs'
 
 const app = express()
 const port = Number(process.env.PORT ?? 3000)
-const configuredAppUrl = process.env.APP_BASE_URL
+const configuredAppUrl = process.env.APP_BASE_URL ?? process.env.RENDER_EXTERNAL_URL
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null
 const smsSender = createTwilioSmsSender({
   accountSid: process.env.TWILIO_ACCOUNT_SID,

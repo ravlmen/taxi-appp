@@ -12,6 +12,7 @@ test('allows a phone on the private network during development with localhost co
 test('production only allows the configured app origin', () => {
   assert.equal(isAllowedAppOrigin('https://taxi.example', 'https://taxi.example', true), true)
   assert.equal(isAllowedAppOrigin('http://192.168.1.25:5173', 'https://taxi.example', true), false)
+  assert.equal(isAllowedAppOrigin('https://taxi.example', undefined, true), false)
 })
 
 test('development does not allow origins outside localhost or the private network', () => {

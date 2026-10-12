@@ -2,6 +2,7 @@ import { isIP } from 'node:net'
 
 export function isAllowedAppOrigin(requestOrigin, configuredAppUrl, isProduction) {
   if (!requestOrigin) return false
+  if (isProduction && !configuredAppUrl) return false
 
   if (configuredAppUrl) {
     try {
