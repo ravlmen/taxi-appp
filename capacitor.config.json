@@ -1,0 +1,14 @@
+{
+  "appId": "cz.taxikoblizek.app",
+  "appName": "Taxi Koblížek",
+  "webDir": "dist",
+  "server": {
+    "url": "https://DOPLNTE-ADRESU-SERVERU.cz",
+    "cleartext": false
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    }
+  }
+}
