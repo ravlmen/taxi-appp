@@ -11,7 +11,7 @@ npm run dev
 
 ### Otevření na mobilu
 
-Počítač i mobil připojte ke stejné Wi-Fi síti. Na počítači spusťte `ipconfig` a najděte jeho IPv4 adresu v části aktivního síťového adaptéru. V mobilním prohlížeči otevřete `http://ADRESA-POČÍTAČE:5173` (například `http://192.168.1.25:5173`). Nepoužívejte `localhost` — ten na mobilu označuje samotný telefon. Pokud se stránka neotevře, povolte Node.js ve Windows Firewallu pro soukromé sítě.
+Počítač i mobil připojte ke stejné Wi-Fi síti. Na počítači spusťte `ipconfig` a najděte jeho IPv4 adresu v části aktivního síťového adaptéru. V mobilním prohlížeči otevřete `http://ADRESA-POČÍTAČE:5173` (například `http://192.168.1.25:5173`). Nepoužívejte `localhost` — ten na mobilu označuje samotný telefon. Ve vývojovém režimu jsou požadavky z privátní Wi-Fi sítě povolené i při `APP_BASE_URL=http://localhost:5173`; v produkci musí adresa aplikace přesně odpovídat `APP_BASE_URL`. Pokud se stránka neotevře, povolte Node.js ve Windows Firewallu pro soukromé sítě.
 
 ## Platba kartou
 

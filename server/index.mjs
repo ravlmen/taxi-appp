@@ -7,12 +7,12 @@ import {
   timingSafeEqual,
 } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
-import { isIP } from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Stripe from 'stripe'
 import webpush from 'web-push'
 import { DEFAULT_PRICING, calculateRidePrice, parsePricing } from '../src/priceCalculator.mjs'
+import { isAllowedAppOrigin as isAllowedOrigin } from './appOrigin.mjs'
 import { createDriverStore } from './driverStore.mjs'
 import { formatE164, isValidPhone, normalizePhone } from './phone.mjs'
 import { createPushStore } from './pushStore.mjs'
@@ -242,35 +242,7 @@ if (isProduction && !smsSender.configured) {
 }
 
 function isAllowedAppOrigin(request) {
-  const requestOrigin = request.get('origin')
-  if (!requestOrigin) return false
-
-  if (configuredAppUrl) {
-    try {
-      return new URL(configuredAppUrl).origin === requestOrigin
-    } catch {
-      return false
-    }
-  }
-
-  const allowedOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173'])
-  if (allowedOrigins.has(requestOrigin)) return true
-
-  try {
-    const origin = new URL(requestOrigin)
-    const octets = origin.hostname.split('.').map(Number)
-    const isPrivateIPv4 = isIP(origin.hostname) === 4 && (
-      octets[0] === 10
-      || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
-      || (octets[0] === 192 && octets[1] === 168)
-    )
-    return origin.origin === requestOrigin
-      && origin.protocol === 'http:'
-      && origin.port === '5173'
-      && isPrivateIPv4
-  } catch {
-    return false
-  }
+  return isAllowedOrigin(request.get('origin'), configuredAppUrl, isProduction)
 }
 
 function isValidAddress(value) {
