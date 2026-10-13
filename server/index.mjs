@@ -62,6 +62,7 @@ const customerCodes = new Map()
 const customerLoginAttempts = new Map()
 const passwordSalt = randomBytes(32)
 const isProduction = process.env.NODE_ENV === 'production'
+const minimumPasswordLength = Math.max(4, Number.parseInt(process.env.DRIVER_MIN_PASSWORD_LENGTH ?? '', 10) || (isProduction ? 12 : 4))
 const configuredDrivers = [
   {
     id: 'driver-1',
@@ -86,7 +87,7 @@ const configuredDrivers = [
   },
 ]
 const configuredDriverAccounts = configuredDrivers
-  .filter(({ username, password }) => username && password?.length >= (isProduction ? 12 : 4))
+  .filter(({ username, password }) => username && password?.length >= minimumPasswordLength)
   .map(({ id, name, username, password, phone }) => ({
     id,
     name,
@@ -240,7 +241,7 @@ async function notifyCustomerRideStatus(ride, status, driverName = '', plate = '
 app.use(express.json({ limit: '10kb' }))
 
 if (!areDriverAccountsConfigured) {
-  console.warn(`Přihlášení řidičů není aktivní: nastavte majitelský účet a různá uživatelská jména s hesly dlouhými alespoň ${isProduction ? 12 : 4} znaky.`)
+  console.warn(`Přihlášení řidičů není aktivní: nastavte majitelský účet a různá uživatelská jména s hesly dlouhými alespoň ${minimumPasswordLength} znaky.`)
 }
 if (isProduction && !smsSender.configured && !verifySender.configured) {
   console.warn('SMS nejsou aktivní: nastavte Twilio Verify (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID) nebo Messaging (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER).')
@@ -767,7 +768,7 @@ app.post('/api/customer/logout', (request, response) => {
 
 app.get('/api/driver/session', (request, response) => {
   if (!areDriverAccountsConfigured) {
-    response.status(503).json({ error: 'Přihlášení řidičů není nastavené. V Renderu nastavte DRIVER_3_USERNAME a DRIVER_3_PASSWORD (heslo alespoň 12 znaků).' })
+    response.status(503).json({ error: `Přihlášení řidičů není nastavené. V Renderu nastavte DRIVER_3_USERNAME a DRIVER_3_PASSWORD (heslo alespoň ${minimumPasswordLength} znaků).` })
     return
   }
   const session = getDriverSession(request)
@@ -781,7 +782,7 @@ app.post('/api/driver/login', async (request, response) => {
     return
   }
   if (!areDriverAccountsConfigured) {
-    response.status(503).json({ error: 'Přihlášení řidičů není nastavené. V Renderu nastavte DRIVER_3_USERNAME a DRIVER_3_PASSWORD (heslo alespoň 12 znaků).' })
+    response.status(503).json({ error: `Přihlášení řidičů není nastavené. V Renderu nastavte DRIVER_3_USERNAME a DRIVER_3_PASSWORD (heslo alespoň ${minimumPasswordLength} znaků).` })
     return
   }
 
@@ -1097,7 +1098,7 @@ app.post('/api/driver/employees', async (request, response) => {
 
   const name = typeof request.body?.name === 'string' ? request.body.name.trim() : ''
   const code = request.body?.code
-  const minimumCodeLength = isProduction ? 12 : 4
+  const minimumCodeLength = minimumPasswordLength
   if (name.length < 2 || name.length > 60 || typeof code !== 'string'
     || code.length < minimumCodeLength || code.length > 200) {
     response.status(400).json({
@@ -1176,7 +1177,7 @@ app.put('/api/driver/employees/:id', async (request, response) => {
 
   const name = typeof request.body?.name === 'string' ? request.body.name.trim() : ''
   const code = typeof request.body?.code === 'string' && request.body.code !== '' ? request.body.code : null
-  const minimumCodeLength = isProduction ? 12 : 4
+  const minimumCodeLength = minimumPasswordLength
   if (name.length < 2 || name.length > 60
     || (code !== null && (code.length < minimumCodeLength || code.length > 200))) {
     response.status(400).json({
