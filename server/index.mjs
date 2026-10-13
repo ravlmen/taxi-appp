@@ -17,7 +17,7 @@ import { createDriverStore } from './driverStore.mjs'
 import { formatE164, isValidPhone, normalizePhone } from './phone.mjs'
 import { createPushStore } from './pushStore.mjs'
 import { createRideStore } from './rideStore.mjs'
-import { createTwilioSmsSender } from './sms.mjs'
+import { createTwilioSmsSender, createTwilioVerifySender } from './sms.mjs'
 
 const app = express()
 const port = Number(process.env.PORT ?? 3000)
@@ -27,6 +27,11 @@ const smsSender = createTwilioSmsSender({
   accountSid: process.env.TWILIO_ACCOUNT_SID,
   authToken: process.env.TWILIO_AUTH_TOKEN,
   fromNumber: process.env.TWILIO_FROM_NUMBER,
+})
+const verifySender = createTwilioVerifySender({
+  accountSid: process.env.TWILIO_ACCOUNT_SID,
+  authToken: process.env.TWILIO_AUTH_TOKEN,
+  verifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID,
 })
 const czechBounds = { minLat: 48.5, maxLat: 51.1, minLon: 12, maxLon: 19 }
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -237,8 +242,8 @@ app.use(express.json({ limit: '10kb' }))
 if (!areDriverAccountsConfigured) {
   console.warn(`Přihlášení řidičů není aktivní: nastavte majitelský účet a různá uživatelská jména s hesly dlouhými alespoň ${isProduction ? 12 : 4} znaky.`)
 }
-if (isProduction && !smsSender.configured) {
-  console.warn('SMS nejsou aktivní: nastavte TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN a TWILIO_FROM_NUMBER.')
+if (isProduction && !smsSender.configured && !verifySender.configured) {
+  console.warn('SMS nejsou aktivní: nastavte Twilio Verify (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID) nebo Messaging (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER).')
 }
 
 function isAllowedAppOrigin(request) {
@@ -601,7 +606,7 @@ app.post('/api/customer/request-code', async (request, response) => {
     response.status(403).json({ error: 'Požadavek pochází z neznámé adresy.' })
     return
   }
-  if (isProduction && !smsSender.configured) {
+  if (isProduction && !smsSender.configured && !verifySender.configured) {
     response.status(503).json({ error: 'SMS ověření není nakonfigurované. Provozovatel musí nastavit Twilio.' })
     return
   }
@@ -624,14 +629,25 @@ app.post('/api/customer/request-code', async (request, response) => {
     response.status(429).json({ error: 'Nový kód si můžete vyžádat za chvíli.' })
     return
   }
-  const code = String(randomBytes(4).readUInt32BE(0) % 1_000_000).padStart(6, '0')
   const challenge = {
-    code,
     expiresAt: now + 5 * 60 * 1000,
     nextAllowedAt: now + 60 * 1000,
     attempts: 0,
   }
-  customerCodes.set(phone, challenge)
+  if (verifySender.configured) {
+    try {
+      await verifySender.send(formatE164(phone))
+    } catch (error) {
+      console.error('Nepodařilo se odeslat ověřovací SMS:', error)
+      response.status(502).json({ error: 'Ověřovací SMS se nepodařilo odeslat. Zkuste to prosím později.' })
+      return
+    }
+    customerCodes.set(phone, { ...challenge, provider: 'verify' })
+    response.json({ accepted: true, message: 'Ověřovací kód jsme odeslali SMS.' })
+    return
+  }
+
+  const code = String(randomBytes(4).readUInt32BE(0) % 1_000_000).padStart(6, '0')
   if (smsSender.configured) {
     try {
       await smsSender.send(formatE164(phone), `Taxi Koblížek: Váš ověřovací kód je ${code}. Platí 5 minut.`)
@@ -640,10 +656,12 @@ app.post('/api/customer/request-code', async (request, response) => {
       response.status(502).json({ error: 'Ověřovací SMS se nepodařilo odeslat. Zkuste to prosím později.' })
       return
     }
+    customerCodes.set(phone, { ...challenge, code, provider: 'messaging' })
     response.json({ accepted: true, message: 'Ověřovací kód jsme odeslali SMS.' })
     return
   }
 
+  customerCodes.set(phone, { ...challenge, code, provider: 'local' })
   response.json({
     accepted: true,
     devCode: code,
@@ -651,12 +669,12 @@ app.post('/api/customer/request-code', async (request, response) => {
   })
 })
 
-app.post('/api/customer/verify-code', (request, response) => {
+app.post('/api/customer/verify-code', async (request, response) => {
   if (!isAllowedAppOrigin(request)) {
     response.status(403).json({ error: 'Požadavek pochází z neznámé adresy.' })
     return
   }
-  if (isProduction && !smsSender.configured) {
+  if (isProduction && !smsSender.configured && !verifySender.configured) {
     response.status(503).json({ error: 'SMS ověření není nakonfigurované. Přihlášení přes kód není dostupné.' })
     return
   }
@@ -681,7 +699,20 @@ app.post('/api/customer/verify-code', (request, response) => {
     return
   }
 
-  if (code !== challenge.code) {
+  let codeMatches
+  if (challenge.provider === 'verify') {
+    try {
+      codeMatches = await verifySender.check(formatE164(phone), code)
+    } catch (error) {
+      console.error('Nepodařilo se ověřit Twilio Verify kód:', error)
+      response.status(502).json({ error: 'Ověřovací kód se nepodařilo ověřit. Zkuste to prosím později.' })
+      return
+    }
+  } else {
+    codeMatches = code === challenge.code
+  }
+
+  if (!codeMatches) {
     challenge.attempts += 1
     if (challenge.attempts >= 5) customerCodes.delete(phone)
     const address = request.ip ?? request.socket.remoteAddress ?? 'unknown'
