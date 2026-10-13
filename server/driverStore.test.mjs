@@ -25,11 +25,16 @@ test('employee accounts persist without exposing their credential hashes', () =>
   assert.deepEqual(store.listEmployees(), [{
     id: 'employee-test',
     name: 'Jan Novák',
+    plate: null,
+    carName: null,
     username: 'jan novák',
   }])
   assert.deepEqual(store.findEmployeeByUsername('jan novák'), {
     id: 'employee-test',
     name: 'Jan Novák',
+    phone: null,
+    plate: null,
+    carName: null,
     username: 'jan novák',
     passwordSalt,
     passwordHash,

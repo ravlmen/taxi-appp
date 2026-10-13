@@ -3,7 +3,7 @@
   "appName": "Taxi Koblížek",
   "webDir": "dist",
   "server": {
-    "url": "https://DOPLNTE-ADRESU-SERVERU.cz",
+    "url": "https://taxi-app-jfgv.onrender.com",
     "cleartext": false
   },
   "plugins": {

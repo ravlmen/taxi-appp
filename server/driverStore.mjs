@@ -38,8 +38,20 @@ export function createDriverStore(databasePath = ':memory:') {
       database.prepare(`
         INSERT INTO employee_accounts (id, name, phone, plate, car_name, username_key, password_salt, password_hash, created_at)
         VALUES (@id, @name, @phone, @plate, @carName, @usernameKey, @passwordSalt, @passwordHash, @createdAt)
-      `).run(employee)
-      return { id: employee.id, name: employee.name, phone: employee.phone, plate: employee.plate, carName: employee.carName, username: employee.usernameKey }
+      `).run({
+        ...employee,
+        phone: employee.phone ?? null,
+        plate: employee.plate ?? null,
+        carName: employee.carName ?? null,
+      })
+      return {
+        id: employee.id,
+        name: employee.name,
+        ...(employee.phone === undefined ? {} : { phone: employee.phone }),
+        ...(employee.plate === undefined ? {} : { plate: employee.plate }),
+        ...(employee.carName === undefined ? {} : { carName: employee.carName }),
+        username: employee.usernameKey,
+      }
     },
     findEmployeeByUsername(usernameKey) {
       return database.prepare(`

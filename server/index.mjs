@@ -767,7 +767,7 @@ app.post('/api/customer/logout', (request, response) => {
 
 app.get('/api/driver/session', (request, response) => {
   if (!areDriverAccountsConfigured) {
-    response.status(503).json({ error: 'Přihlášení řidičů zatím není nastavené.' })
+    response.status(503).json({ error: 'Přihlášení řidičů není nastavené. V Renderu nastavte DRIVER_3_USERNAME a DRIVER_3_PASSWORD (heslo alespoň 12 znaků).' })
     return
   }
   const session = getDriverSession(request)
@@ -781,7 +781,7 @@ app.post('/api/driver/login', async (request, response) => {
     return
   }
   if (!areDriverAccountsConfigured) {
-    response.status(503).json({ error: 'Přihlášení vyžaduje nastavený majitelský účet a jedinečná uživatelská jména řidičů.' })
+    response.status(503).json({ error: 'Přihlášení řidičů není nastavené. V Renderu nastavte DRIVER_3_USERNAME a DRIVER_3_PASSWORD (heslo alespoň 12 znaků).' })
     return
   }
 

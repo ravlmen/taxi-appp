@@ -854,6 +854,7 @@ function CustomerLogin({ onAuthenticated }) {
 
         {error && <p className="error-message" role="alert">{error}</p>}
         {notice && !devCode && <p className="notice-message" role="status">{notice}</p>}
+        <a className="customer-driver-login" href="/ridic">Jste řidič? Přihlaste se zde</a>
       </section>
     </main>
   )

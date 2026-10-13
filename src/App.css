@@ -1259,6 +1259,28 @@
   width: 100%;
 }
 
+.customer-driver-login {
+  display: block;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #f0e8dc;
+  color: #75540f;
+  font-size: 13px;
+  font-weight: 750;
+  text-align: center;
+  text-decoration: none;
+}
+
+.customer-driver-login:hover {
+  text-decoration: underline;
+}
+
+.customer-driver-login:focus-visible {
+  border-radius: 4px;
+  outline: 3px solid #d7a833;
+  outline-offset: 3px;
+}
+
 .customer-dev-code {
   margin: 0;
   padding: 11px 12px;
