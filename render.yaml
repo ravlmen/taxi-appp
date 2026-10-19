@@ -2,13 +2,22 @@ services:
   - type: web
     name: taxi-koblizek
     runtime: node
-    plan: free
+    # Persistent disks (required so the SQLite database survives restarts and
+    # redeploys) are only available on paid plans. The free plan has an
+    # ephemeral filesystem, so any data written to disk is lost on restart.
+    plan: starter
     buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /api/availability
+    disk:
+      name: taxi-koblizek-data
+      mountPath: /opt/render/project/data
+      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
+      - key: DATABASE_PATH
+        value: /opt/render/project/data/taxi-koblizek.sqlite
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
@@ -18,4 +27,8 @@ services:
       - key: DRIVER_3_USERNAME
         sync: false
       - key: DRIVER_3_PASSWORD
+        sync: false
+      - key: PAJA_CUSTOMER_PASSWORD
+        sync: false
+      - key: PAJA_CUSTOMER_PHONE
         sync: false
