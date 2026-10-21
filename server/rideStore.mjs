@@ -53,12 +53,24 @@ export function createRideStore(databasePath = ':memory:') {
     database.exec('ALTER TABLE rides ADD COLUMN offer_eta_minutes INTEGER')
     database.exec('ALTER TABLE rides ADD COLUMN offer_at TEXT')
   }
+  if (!rideColumns.has('offer_pickup_fee_czk')) {
+    database.exec('ALTER TABLE rides ADD COLUMN offer_pickup_fee_czk INTEGER')
+    database.exec('ALTER TABLE rides ADD COLUMN offer_pickup_fee_original_czk INTEGER')
+    database.exec('ALTER TABLE rides ADD COLUMN pickup_fee_czk INTEGER NOT NULL DEFAULT 0')
+    database.exec('ALTER TABLE rides ADD COLUMN pickup_fee_original_czk INTEGER NOT NULL DEFAULT 0')
+  }
+
+  if (!rideColumns.has('paid_at')) {
+    database.exec('ALTER TABLE rides ADD COLUMN paid_at TEXT')
+    database.exec("UPDATE rides SET paid_at = created_at WHERE payment_method = 'card' AND payment_session_id IS NOT NULL")
+  }
 
   const OFFER_TTL_MS = 3 * 60 * 1000
   database.exec('DROP TABLE IF EXISTS customer_discounts')
   const expireOffers = () => {
     database.prepare(`
-      UPDATE rides SET offer_driver_id = NULL, offer_eta_minutes = NULL, offer_at = NULL
+      UPDATE rides SET offer_driver_id = NULL, offer_eta_minutes = NULL, offer_at = NULL,
+        offer_pickup_fee_czk = NULL, offer_pickup_fee_original_czk = NULL
       WHERE status = 'pending' AND offer_driver_id IS NOT NULL AND offer_at < ?
     `).run(new Date(Date.now() - OFFER_TTL_MS).toISOString())
   }
@@ -71,6 +83,9 @@ export function createRideStore(databasePath = ':memory:') {
       amount_czk AS amountCzk, distance_meters AS distanceMeters,
       payment_method AS paymentMethod, status, driver_id AS driverId,
       offer_driver_id AS offerDriverId, offer_eta_minutes AS offerEtaMinutes,
+      offer_pickup_fee_czk AS offerPickupFeeCzk, offer_pickup_fee_original_czk AS offerPickupFeeOriginalCzk,
+      pickup_fee_czk AS pickupFeeCzk, pickup_fee_original_czk AS pickupFeeOriginalCzk,
+      paid_at AS paidAt,
       created_at AS createdAt, accepted_at AS acceptedAt, completed_at AS completedAt
     FROM rides WHERE id = ?
   `)
@@ -96,35 +111,23 @@ export function createRideStore(databasePath = ':memory:') {
     return getRide.get(ride.id)
   })
 
-  const savePaidRide = database.transaction((ride) => {
-    const result = database.prepare(`
-      INSERT OR IGNORE INTO rides (
-        id, payment_session_id, pickup, destination, note, route_geometry, amount_czk, distance_meters,
-        customer_name, customer_phone, payment_method, status, created_at
-      ) VALUES (
-        @id, @paymentSessionId, @pickup, @destination, @note, @routeGeometry, @amountCzk, @distanceMeters,
-        @customerName, @customerPhone,
-        @paymentMethod, @status, @createdAt
-      )
-    `).run({
-      ...ride,
-      note: ride.note ?? '',
-      routeGeometry: ride.routeGeometry ? JSON.stringify(ride.routeGeometry) : null,
-      paymentMethod: 'card',
-      status: 'pending',
-    })
-    const saved = database.prepare('SELECT id FROM rides WHERE payment_session_id = ?').get(ride.paymentSessionId)
-    return { id: saved.id, created: result.changes === 1 }
-  })
-
   return {
     createCashRide(ride) {
       return createRide({ ...ride, paymentSessionId: null, paymentMethod: 'cash', status: 'pending' })
     },
 
-    createPaidRide(ride) {
-      const saved = savePaidRide({ ...ride, paymentMethod: 'card' })
-      return { ...getRide.get(saved.id), created: saved.created }
+    createCardRide(ride) {
+      return createRide({ ...ride, paymentSessionId: null, paymentMethod: 'card', status: 'pending' })
+    },
+
+    markRidePaid(id, paymentSessionId, amountCzk) {
+      const result = database.prepare(`
+        UPDATE rides SET paid_at = ?, payment_session_id = ?
+        WHERE id = ? AND payment_method = 'card' AND paid_at IS NULL AND amount_czk = ?
+          AND status IN ('accepted', 'to_pickup', 'with_customer', 'completed')
+      `).run(new Date().toISOString(), paymentSessionId, id, amountCzk)
+      const ride = getRide.get(id)
+      return ride ? { ...ride, newlyPaid: result.changes === 1 } : null
     },
 
     getRide(id) {
@@ -231,6 +234,8 @@ export function createRideStore(databasePath = ':memory:') {
           note, route_geometry AS routeGeometry,
           customer_name AS customerName, customer_phone AS customerPhone,
           distance_meters AS distanceMeters, payment_method AS paymentMethod,
+          pickup_fee_czk AS pickupFeeCzk, pickup_fee_original_czk AS pickupFeeOriginalCzk,
+          paid_at AS paidAt,
           status, created_at AS createdAt, accepted_at AS acceptedAt,
           completed_at AS completedAt
         FROM rides
@@ -240,20 +245,32 @@ export function createRideStore(databasePath = ':memory:') {
       `).all(driverId)
     },
 
-    offerRide(id, driverId, etaMinutes) {
+    offerRide(id, driverId, etaMinutes, pickupFee = null) {
       expireOffers()
       const result = database.prepare(`
-        UPDATE rides SET offer_driver_id = ?, offer_eta_minutes = ?, offer_at = ?
+        UPDATE rides SET offer_driver_id = ?, offer_eta_minutes = ?, offer_at = ?,
+          offer_pickup_fee_czk = ?, offer_pickup_fee_original_czk = ?
         WHERE id = ? AND status = 'pending' AND driver_id IS NULL AND offer_driver_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM ride_rejections WHERE ride_id = rides.id AND driver_id = ?)
-      `).run(driverId, etaMinutes, new Date().toISOString(), id, driverId)
+      `).run(
+        driverId,
+        etaMinutes,
+        new Date().toISOString(),
+        pickupFee?.amountCzk ?? null,
+        pickupFee?.originalAmountCzk ?? null,
+        id,
+        driverId,
+      )
       return result.changes === 1 ? getRide.get(id) : null
     },
 
     confirmOffer(id) {
       expireOffers()
       const result = database.prepare(`
-        UPDATE rides SET status = 'accepted', driver_id = offer_driver_id, accepted_at = ?
+        UPDATE rides SET status = 'accepted', driver_id = offer_driver_id, accepted_at = ?,
+          amount_czk = amount_czk + COALESCE(offer_pickup_fee_czk, 0),
+          pickup_fee_czk = COALESCE(offer_pickup_fee_czk, 0),
+          pickup_fee_original_czk = COALESCE(offer_pickup_fee_original_czk, 0)
         WHERE id = ? AND status = 'pending' AND driver_id IS NULL AND offer_driver_id IS NOT NULL
       `).run(new Date().toISOString(), id)
       return result.changes === 1 ? getRide.get(id) : null
@@ -268,7 +285,9 @@ export function createRideStore(databasePath = ':memory:') {
           INSERT OR IGNORE INTO ride_rejections (ride_id, driver_id, rejected_at) VALUES (?, ?, ?)
         `).run(id, ride.offerDriverId, new Date().toISOString())
         database.prepare(`
-          UPDATE rides SET offer_driver_id = NULL, offer_eta_minutes = NULL, offer_at = NULL WHERE id = ?
+          UPDATE rides SET offer_driver_id = NULL, offer_eta_minutes = NULL, offer_at = NULL,
+            offer_pickup_fee_czk = NULL, offer_pickup_fee_original_czk = NULL
+          WHERE id = ?
         `).run(id)
       })()
       return true
