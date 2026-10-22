@@ -248,7 +248,7 @@ function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance 
             />
           </label>
           <label className="driver-eta-field driver-pickup-fee-field">
-            <span>Přistavení vozidla (Kč)</span>
+            <span>Nástupní sazba / přistavení vozidla (Kč)</span>
             <input
               type="number"
               inputMode="numeric"
