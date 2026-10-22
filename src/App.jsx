@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
 import { DEFAULT_PRICING } from './priceCalculator.mjs'
 import { isNativeApp, requestNativePermission, subscribeToPush } from './pushClient.js'
 import DriverApp from './DriverApp.jsx'
-import { fetchPlaceSuggestions } from './placeSearch.mjs'
 
 const navItems = [
   { label: 'Objednat', icon: '⌖' },
@@ -16,7 +15,207 @@ const navItems = [
 
 let lastGeocodingRequestAt = Number.NEGATIVE_INFINITY
 let geocodingQueue = Promise.resolve()
-const placeSuggestionCache = new Map()
+const ruianSearchCache = new Map()
+const ruianPageSize = 30
+const ruianQueryEndpoint = 'https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/MapServer/1/query'
+const czechAccentVariants = {
+  a: true,
+  c: true,
+  d: true,
+  e: true,
+  i: true,
+  n: true,
+  o: true,
+  r: true,
+  s: true,
+  t: true,
+  u: true,
+  y: true,
+  z: true,
+}
+
+function normalizeAddressSearch(value) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('cs-CZ').replaceAll('y', 'i')
+}
+
+function getAddressSearchTerms(query) {
+  return query
+    .replace(/[%_]/g, ' ')
+    .trim()
+    .split(/[,\s.]+/)
+    .filter(Boolean)
+    .flatMap((term) => {
+      const match = normalizeAddressSearch(term).match(/^(.{4,}?)(namesti|nam)$/)
+      return match ? [term.slice(0, match[1].length), term.slice(match[1].length)] : [term]
+    })
+}
+
+function getCachedAddressSuggestions(terms) {
+  const normalizedTerms = terms.map(normalizeAddressSearch)
+  for (const cached of [...ruianSearchCache.values()].reverse()) {
+    const matches = cached.addresses.filter(({ address }) => {
+      const normalizedAddress = normalizeAddressSearch(address)
+      return normalizedTerms.every((term) => normalizedAddress.includes(term))
+    })
+    if (matches.length) return matches
+  }
+  return []
+}
+
+const ruianMunicipalityEndpoint = 'https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/MapServer/12/query'
+
+function getMunicipalityPatterns(query, allAccents) {
+  const characters = Array.from(query.trim().replace(/\s+/g, ' '), normalizeAddressSearch)
+  characters.forEach((character, index) => {
+    if (index === 0 || characters[index - 1] === ' ') characters[index] = character.toLocaleUpperCase('cs-CZ')
+  })
+  const patterns = [characters.join('')]
+  characters.forEach((character, index) => {
+    if (czechAccentVariants[character.toLocaleLowerCase('cs-CZ')]) {
+      const pattern = [...characters]
+      pattern[index] = '_'
+      patterns.push(pattern.join(''))
+    }
+  })
+  if (allAccents) {
+    patterns.push(characters.map((character) => (
+      czechAccentVariants[character.toLocaleLowerCase('cs-CZ')] ? '_' : character
+    )).join(''))
+  }
+  return patterns
+}
+
+async function fetchMunicipalitySuggestions(query, signal) {
+  const normalizedQuery = normalizeAddressSearch(query.trim().replace(/\s+/g, ' '))
+  if (normalizedQuery.length < 2) return []
+
+  const queryMunicipalities = async (allAccents) => {
+    const url = new URL(ruianMunicipalityEndpoint)
+    const where = getMunicipalityPatterns(query, allAccents)
+      .map((pattern) => `nazev LIKE '${pattern.replaceAll("'", "''")}%'`)
+      .join(' OR ')
+    url.searchParams.set('where', where)
+    url.searchParams.set('outFields', 'kod,nazev')
+    url.searchParams.set('returnGeometry', 'false')
+    url.searchParams.set('f', 'json')
+    url.searchParams.set('resultRecordCount', '300')
+    url.searchParams.set('orderByFields', 'nazev ASC')
+
+    const response = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) })
+    if (!response.ok) return []
+    const result = await response.json()
+    if (!Array.isArray(result.features)) return []
+
+    const seen = new Set()
+    return result.features
+      .map(({ attributes }) => ({ id: `obec-${attributes?.kod}`, type: 'city', address: String(attributes?.nazev ?? '').trim() }))
+      .filter(({ address }) => address && normalizeAddressSearch(address).startsWith(normalizedQuery))
+      .filter(({ address }) => !seen.has(address) && seen.add(address))
+  }
+
+  let municipalities = await queryMunicipalities(false)
+  if (municipalities.length === 0 && normalizedQuery.length >= 4) municipalities = await queryMunicipalities(true)
+
+  return municipalities
+    .sort((first, second) => (
+      Number(normalizeAddressSearch(second.address) === normalizedQuery)
+        - Number(normalizeAddressSearch(first.address) === normalizedQuery)
+      || first.address.length - second.address.length
+    ))
+    .slice(0, 5)
+}
+
+function getAccentInsensitivePatterns(term, maxWildcardCount) {
+  const characters = Array.from(term, (character) => normalizeAddressSearch(character))
+  if (characters.length) characters[0] = characters[0].toLocaleUpperCase('cs-CZ')
+  if (maxWildcardCount >= 99) {
+    return [characters.map((character) => (
+      czechAccentVariants[character.toLocaleLowerCase('cs-CZ')] ? '_' : character
+    )).join('')]
+  }
+
+  const accentPositions = characters.flatMap((character, index) => (
+    czechAccentVariants[character.toLocaleLowerCase('cs-CZ')] ? [index] : []
+  ))
+  const patterns = [characters.join('')]
+  const addWildcardPatterns = (start, wildcardCount, selectedPositions) => {
+    if (selectedPositions.length === wildcardCount) {
+      const pattern = [...characters]
+      for (const position of selectedPositions) pattern[position] = '_'
+      patterns.push(pattern.join(''))
+      return
+    }
+    for (let index = start; index < accentPositions.length; index += 1) {
+      selectedPositions.push(accentPositions[index])
+      addWildcardPatterns(index + 1, wildcardCount, selectedPositions)
+      selectedPositions.pop()
+    }
+  }
+  for (let wildcardCount = 1; wildcardCount <= Math.min(maxWildcardCount, accentPositions.length); wildcardCount += 1) {
+    addWildcardPatterns(0, wildcardCount, [])
+  }
+  return [...new Set(patterns)]
+}
+
+function getRuianSearchWhere(terms, wildcardCount = 0) {
+  return terms.map((term) => {
+    const patterns = wildcardCount ? getAccentInsensitivePatterns(term, wildcardCount) : [term]
+    const clauses = patterns.map((variant) => {
+      const pattern = variant.replaceAll("'", "''")
+      return `adresa LIKE '%${pattern}%'`
+    })
+    return clauses.length > 1 ? `(${clauses.join(' OR ')})` : clauses[0]
+  }).join(' AND ')
+}
+
+async function fetchRuianAddressPage(terms, offset, wildcardCount, signal) {
+  const url = new URL(ruianQueryEndpoint)
+  url.searchParams.set('where', getRuianSearchWhere(terms, wildcardCount))
+  url.searchParams.set('outFields', 'kod,adresa,psc')
+  url.searchParams.set('returnGeometry', 'true')
+  url.searchParams.set('outSR', '4326')
+  url.searchParams.set('f', 'json')
+  url.searchParams.set('resultRecordCount', String(ruianPageSize))
+  url.searchParams.set('resultOffset', String(offset))
+  url.searchParams.set('orderByFields', 'adresa ASC,kod ASC')
+
+  let response
+  try {
+    response = await fetch(url, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
+    })
+  } catch (error) {
+    if (signal.aborted) throw error
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      throw new Error('Vyhledání v registru adres vypršelo. Zkuste to prosím znovu.')
+    }
+    throw new Error('K registru adres RÚIAN se nepodařilo připojit. Zkontrolujte připojení a zkuste to znovu.')
+  }
+  if (!response.ok) throw new Error('Registr adres RÚIAN teď není dostupný.')
+
+  const result = await response.json()
+  if (result.error) throw new Error('Registr adres RÚIAN vrátil chybu. Zkuste hledání později.')
+  if (!Array.isArray(result.features)) throw new Error('Registr adres RÚIAN vrátil neplatné výsledky.')
+
+  const addresses = result.features.flatMap(({ attributes, geometry }) => {
+    const address = attributes?.adresa?.trim()
+    const lat = Number(geometry?.y)
+    const lon = Number(geometry?.x)
+    if (
+      !address
+      || !Number.isFinite(lat)
+      || !Number.isFinite(lon)
+      || (wildcardCount && !terms.every((term) => normalizeAddressSearch(address).includes(normalizeAddressSearch(term))))
+    ) return []
+    return [{ id: String(attributes.kod), address, lat, lon }]
+  })
+
+  return {
+    addresses,
+    nextOffset: offset + result.features.length,
+    hasMore: result.exceededTransferLimit === true || result.features.length === ruianPageSize,
+  }
+}
 
 function fetchGeocoding(url, signal) {
   const request = geocodingQueue.then(async () => {
@@ -64,63 +263,140 @@ function AddressAutocomplete({ value, onChange, onSelect, label, disabled, class
   const [suggestions, setSuggestions] = useState([])
   const [activeIndex, setActiveIndex] = useState(0)
   const [isSearching, setIsSearching] = useState(false)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
   const [searchError, setSearchError] = useState('')
   const blurTimerRef = useRef(null)
   const searchDebounceTimerRef = useRef(null)
   const searchRequestIdRef = useRef(0)
   const searchControllerRef = useRef(null)
+  const activeCacheKeyRef = useRef('')
+  const isLoadingMoreRef = useRef(false)
 
   const searchAddresses = async (searchValue = value) => {
     clearTimeout(searchDebounceTimerRef.current)
     searchDebounceTimerRef.current = null
     const query = searchValue.trim()
+    const terms = getAddressSearchTerms(query)
     searchControllerRef.current?.abort()
     searchControllerRef.current = null
     const requestId = ++searchRequestIdRef.current
+    isLoadingMoreRef.current = false
+    setHasMore(false)
+    setIsLoadingMore(false)
 
-    if (query.length < 3) {
+    if (query.length < 3 || terms.length === 0) {
       setIsOpen(true)
       setSuggestions([])
       setIsSearching(false)
-      setSearchError('Zadejte alespoň 3 znaky pro vyhledání adresy nebo místa přes Mapy.com.')
+      setSearchError('Zadejte alespoň 3 znaky pro vyhledání adresy.')
       return
     }
 
-    const cacheKey = query.toLocaleLowerCase('cs-CZ')
-    if (placeSuggestionCache.has(cacheKey)) {
-      const cached = placeSuggestionCache.get(cacheKey)
-      setSuggestions(cached)
+    const cacheKey = terms.map(normalizeAddressSearch).sort().join(' ')
+    activeCacheKeyRef.current = cacheKey
+    if (ruianSearchCache.has(cacheKey)) {
+      const cached = ruianSearchCache.get(cacheKey)
+      const cachedCities = cached.cities ?? []
+      setSuggestions([...cachedCities, ...cached.addresses])
+      setHasMore(cached.hasMore)
       setIsSearching(false)
+      setIsLoadingMore(false)
       setActiveIndex(0)
-      setSearchError(cached.length ? '' : 'Mapy.com nenašly odpovídající adresu ani místo.')
+      setSearchError(cached.addresses.length || cachedCities.length ? '' : 'V registru RÚIAN nebyla nalezena odpovídající adresa. Zkuste hledat podle města, ulice nebo PSČ.')
       setIsOpen(true)
       return
     }
 
+    const cachedSuggestions = getCachedAddressSuggestions(terms)
     const controller = new AbortController()
     searchControllerRef.current = controller
     setIsOpen(true)
     setIsSearching(true)
-    setSuggestions([])
+    setIsLoadingMore(false)
+    setHasMore(false)
+    setSuggestions(cachedSuggestions)
     setSearchError('')
 
+    const showCities = !/\s$/.test(searchValue) && !/\d/.test(query)
+    const citiesPromise = showCities
+      ? fetchMunicipalitySuggestions(query, controller.signal).catch(() => [])
+      : Promise.resolve([])
+    void citiesPromise.then((found) => {
+      if (requestId !== searchRequestIdRef.current || found.length === 0) return
+      setSuggestions((current) => [...found, ...current.filter(({ type }) => type !== 'city')])
+    })
+
     try {
-      const found = await fetchPlaceSuggestions(query, controller.signal)
-      if (requestId !== searchRequestIdRef.current || controller.signal.aborted) return
-      placeSuggestionCache.set(cacheKey, found)
-      if (placeSuggestionCache.size > 50) placeSuggestionCache.delete(placeSuggestionCache.keys().next().value)
-      setSuggestions(found)
-      if (found.length === 0) setSearchError('Mapy.com nenašly odpovídající adresu ani místo.')
+      let wildcardCount = terms.some((term) => (
+        term[0] !== term[0].toLocaleUpperCase('cs-CZ')
+      )) ? 1 : 0
+      // Přesný dotaz a dotaz bez diakritiky běží souběžně, aby se nečekalo na opakování.
+      const fallbackPromise = fetchRuianAddressPage(terms, 0, 99, controller.signal)
+      fallbackPromise.catch(() => {})
+      let page = await fetchRuianAddressPage(terms, 0, wildcardCount, controller.signal)
+      if (page.addresses.length === 0) {
+        page = await fallbackPromise
+        wildcardCount = 99
+      }
+      const cities = await citiesPromise
+      if (requestId !== searchRequestIdRef.current) return
+      ruianSearchCache.set(cacheKey, { ...page, cities, wildcardCount })
+      if (ruianSearchCache.size > 25) ruianSearchCache.delete(ruianSearchCache.keys().next().value)
+      setSuggestions([...cities, ...page.addresses])
+      setHasMore(page.hasMore)
+      if (page.addresses.length === 0 && cities.length === 0) {
+        setSearchError('V registru RÚIAN nebyla nalezena odpovídající adresa. Zkuste hledat podle města, ulice nebo PSČ.')
+      }
       setActiveIndex(0)
     } catch (error) {
       if (requestId !== searchRequestIdRef.current || controller.signal.aborted) return
-      setSuggestions([])
-      setSearchError(error instanceof Error ? error.message : 'Vyhledávání přes Mapy.com se nepodařilo.')
+      setSuggestions(getCachedAddressSuggestions(terms))
+      setHasMore(false)
+      setSearchError(error instanceof Error ? error.message : 'Adresy se nepodařilo vyhledat.')
     } finally {
       if (requestId === searchRequestIdRef.current) {
         searchControllerRef.current = null
         setIsSearching(false)
       }
+    }
+  }
+
+  const loadMoreAddresses = async () => {
+    const cacheKey = activeCacheKeyRef.current
+    const cached = ruianSearchCache.get(cacheKey)
+    if (!cached?.hasMore || isLoadingMoreRef.current || isLoadingMore || isSearching) return
+
+    const requestId = ++searchRequestIdRef.current
+    const controller = new AbortController()
+    searchControllerRef.current = controller
+    isLoadingMoreRef.current = true
+    setIsLoadingMore(true)
+    setSearchError('')
+
+    try {
+      const page = await fetchRuianAddressPage(
+        getAddressSearchTerms(value.trim()),
+        cached.nextOffset,
+        cached.wildcardCount,
+        controller.signal,
+      )
+      if (requestId !== searchRequestIdRef.current) return
+      const addresses = [...cached.addresses, ...page.addresses]
+      const cities = cached.cities ?? []
+      ruianSearchCache.set(cacheKey, { ...page, addresses, cities, wildcardCount: cached.wildcardCount })
+      setSuggestions([...cities, ...addresses])
+      setHasMore(page.hasMore)
+      setActiveIndex(cities.length + cached.addresses.length)
+    } catch (error) {
+      if (requestId !== searchRequestIdRef.current || controller.signal.aborted) return
+      setSearchError(error instanceof Error ? error.message : 'Další adresy se nepodařilo načíst.')
+    } finally {
+      if (requestId === searchRequestIdRef.current) {
+        searchControllerRef.current = null
+        setIsLoadingMore(false)
+      }
+      isLoadingMoreRef.current = false
     }
   }
 
@@ -131,6 +407,12 @@ function AddressAutocomplete({ value, onChange, onSelect, label, disabled, class
   }, [])
 
   const selectSuggestion = (suggestion) => {
+    if (suggestion.type === 'city') {
+      const nextValue = `${suggestion.address} `
+      onChange(nextValue)
+      void searchAddresses(nextValue)
+      return
+    }
     clearTimeout(searchDebounceTimerRef.current)
     searchRequestIdRef.current += 1
     searchControllerRef.current?.abort()
@@ -138,6 +420,9 @@ function AddressAutocomplete({ value, onChange, onSelect, label, disabled, class
     onSelect(suggestion.address, { lat: suggestion.lat, lon: suggestion.lon })
     setSuggestions([])
     setIsSearching(false)
+    setIsLoadingMore(false)
+    isLoadingMoreRef.current = false
+    setHasMore(false)
     setSearchError('')
     setIsOpen(false)
   }
@@ -151,6 +436,9 @@ function AddressAutocomplete({ value, onChange, onSelect, label, disabled, class
       setIsOpen(false)
       setSuggestions([])
       setIsSearching(false)
+      setIsLoadingMore(false)
+      isLoadingMoreRef.current = false
+      setHasMore(false)
       setSearchError('')
       return
     }
@@ -196,14 +484,15 @@ function AddressAutocomplete({ value, onChange, onSelect, label, disabled, class
           }, 120)
         }}
         onChange={(event) => {
-          clearTimeout(searchDebounceTimerRef.current)
-          searchDebounceTimerRef.current = null
           const nextValue = event.target.value
           searchRequestIdRef.current += 1
           searchControllerRef.current?.abort()
           searchControllerRef.current = null
           onChange(nextValue)
-          setSuggestions([])
+          setSuggestions(nextValue.trim().length >= 3 ? getCachedAddressSuggestions(getAddressSearchTerms(nextValue)) : [])
+          setHasMore(false)
+          setIsLoadingMore(false)
+          isLoadingMoreRef.current = false
           setSearchError('')
           setActiveIndex(0)
           if (nextValue.trim().length >= 3) {
@@ -212,7 +501,7 @@ function AddressAutocomplete({ value, onChange, onSelect, label, disabled, class
             searchDebounceTimerRef.current = setTimeout(() => {
               searchDebounceTimerRef.current = null
               void searchAddresses(nextValue)
-            }, 400)
+            }, 150)
           } else {
             clearTimeout(searchDebounceTimerRef.current)
             setIsOpen(false)
@@ -222,42 +511,65 @@ function AddressAutocomplete({ value, onChange, onSelect, label, disabled, class
         onKeyDown={handleKeyDown}
         disabled={disabled}
         required
-        placeholder="Adresa, nádraží, škola, podnik…"
+        placeholder="Město, ulice a číslo"
       />
-      {isOpen && (isSearching || suggestions.length > 0 || searchError) && (
+      {isOpen && (isSearching || suggestions.length > 0 || hasMore || searchError) && (
         <div className="address-suggestions">
           {isSearching && (
             <div className="suggestion-message">
               {suggestions.length
-                ? 'Hledám další shody přes Mapy.com…'
-                : 'Hledám adresy a místa přes Mapy.com…'}
+                ? 'Hledám další shody; můžete zatím vybrat rychlý návrh.'
+                : 'Hledám adresy v registru RÚIAN po celé ČR…'}
             </div>
           )}
           {!isSearching && searchError && <div className="suggestion-message">{searchError}</div>}
           {suggestions.length > 0 && (
-            <div id={`${id}-suggestions`} role="listbox" aria-label={`Návrhy pro ${label}`}>
-              {suggestions.map((suggestion, index) => (
-                <button
-                  className={`address-suggestion${index === activeIndex ? ' is-active' : ''}`}
-                  id={`${id}-option-${index}`}
-                  key={suggestion.id}
-                  type="button"
-                  role="option"
-                  aria-selected={index === activeIndex}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => selectSuggestion(suggestion)}
-                >
-                  <span className="suggestion-pin" aria-hidden="true">⌖</span>
-                  <span className="suggestion-copy"><strong>{suggestion.address}</strong><small>{suggestion.type === 'place' ? 'Bod zájmu · Mapy.com' : 'Adresa nebo lokalita · Mapy.com'}</small></span>
-                </button>
-              ))}
-            </div>
+            <>
+              {hasMore && (
+                <div className="suggestion-message">
+                  Načteno {suggestions.length} adres. Posuňte seznam dolů pro další.
+                </div>
+              )}
+              <div
+                id={`${id}-suggestions`}
+                role="listbox"
+                aria-label={`Návrhy pro ${label}`}
+                onScroll={(event) => {
+                  const listbox = event.currentTarget
+                  const isNearBottom = listbox.scrollHeight - listbox.scrollTop - listbox.clientHeight < 80
+                  if (isNearBottom && hasMore && !isLoadingMore && !isSearching) {
+                    void loadMoreAddresses()
+                  }
+                }}
+              >
+                {suggestions.map((suggestion, index) => (
+                  <button
+                    className={`address-suggestion${index === activeIndex ? ' is-active' : ''}`}
+                    id={`${id}-option-${index}`}
+                    key={suggestion.id}
+                    type="button"
+                    role="option"
+                    aria-selected={index === activeIndex}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => selectSuggestion(suggestion)}
+                  >
+                    <span className="suggestion-pin" aria-hidden="true">⌖</span>
+                    <span className="suggestion-copy"><strong>{suggestion.address}</strong><small>{suggestion.type === 'city' ? 'Město / obec · pokračujte ulicí a číslem' : 'Adresní místo RÚIAN · ČÚZK'}</small></span>
+                  </button>
+                ))}
+              </div>
+            </>
           )}
-          {(isSearching || suggestions.length > 0 || searchError) && (
-            <a className="mapy-attribution" href="https://mapy.com/" target="_blank" rel="noreferrer">
-              <img src="https://api.mapy.com/img/api/logo.svg" alt="" />
-              <span>Hledají Mapy.com · © Seznam.cz a.s. a další</span>
-            </a>
+          {hasMore && (
+            <button
+              className="load-more-addresses"
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => void loadMoreAddresses()}
+              disabled={isLoadingMore}
+            >
+              {isLoadingMore ? 'Načítám další adresy…' : 'Načíst další adresy'}
+            </button>
           )}
         </div>
       )}
@@ -360,29 +672,7 @@ function CustomerLogin({ onAuthenticated }) {
   const [notice, setNotice] = useState('')
   const typedLogin = phone.trim()
   const isOwnerLogin = /\p{L}/u.test(typedLogin) && !/\d/.test(typedLogin)
-  const isPajaLogin = typedLogin.toLocaleLowerCase('cs-CZ') === 'paja'
   const staffUsername = typedLogin.toLocaleLowerCase('cs-CZ') === 'koblizek' ? 'majitel' : typedLogin
-
-  const signInPajaCustomer = async (event) => {
-    event.preventDefault()
-    setIsSubmitting(true)
-    setError('')
-    setNotice('')
-    try {
-      const response = await fetch('/api/customer/password-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: typedLogin, password: ownerPassword }),
-      })
-      const result = await response.json()
-      if (!response.ok) throw new Error(result.error ?? 'Přihlášení zákaznického účtu se nepodařilo.')
-      onAuthenticated(result.customer, true)
-    } catch (loginError) {
-      setError(loginError instanceof Error ? loginError.message : 'Přihlášení zákaznického účtu se nepodařilo.')
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
 
   const signInOwner = async (event) => {
     event.preventDefault()
@@ -456,12 +746,10 @@ function CustomerLogin({ onAuthenticated }) {
           <span><strong>Taxi Koblížek</strong><small>Jízda s úsměvem</small></span>
         </a>
         <p className="section-eyebrow">Rychle a bezpečně</p>
-        <h1>{isCodeRequested ? 'Ověřte své číslo' : isPajaLogin ? 'Přihlášení zákazníka' : isOwnerLogin ? 'Přihlášení personálu' : 'Přihlášení zákazníka'}</h1>
+        <h1>{isCodeRequested ? 'Ověřte své číslo' : isOwnerLogin ? 'Přihlášení personálu' : 'Přihlášení zákazníka'}</h1>
         <p className="customer-login-intro">
           {isCodeRequested
             ? `Zadejte šestimístný kód pro číslo ${phone}.`
-            : isPajaLogin
-              ? 'Zadejte heslo ke svému zákaznickému účtu.'
             : isOwnerLogin
               ? `Zadejte heslo pro účet „${typedLogin}“.`
             : 'Přihlaste se telefonním číslem. Po ověření ho už nebudete muset zadávat u každé jízdy.'}
@@ -506,7 +794,7 @@ function CustomerLogin({ onAuthenticated }) {
             </button>
           </form>
         ) : (
-          <form className="customer-login-form" onSubmit={isPajaLogin ? signInPajaCustomer : isOwnerLogin ? signInOwner : requestCode}>
+          <form className="customer-login-form" onSubmit={isOwnerLogin ? signInOwner : requestCode}>
             {!isOwnerLogin && (
               <label>
                 <span>Vaše jméno</span>
@@ -566,12 +854,7 @@ function CustomerLogin({ onAuthenticated }) {
 
         {error && <p className="error-message" role="alert">{error}</p>}
         {notice && !devCode && <p className="notice-message" role="status">{notice}</p>}
-        <a
-          className="customer-terms-link"
-          href="https://www.taxikoblizek.cz/vseobecne-obchodni-podminky-vop-pro-uzivani-mobilni-aplikace-a-prepravnich-sluzeb/"
-        >
-          Všeobecné obchodní podmínky
-        </a>
+        <a className="customer-driver-login" href="/ridic">Jste řidič? Přihlaste se zde</a>
       </section>
     </main>
   )
@@ -595,10 +878,6 @@ function App() {
   const [orderNote, setOrderNote] = useState('')
   const [customerSession, setCustomerSession] = useState(null)
   const [isCheckingCustomerSession, setIsCheckingCustomerSession] = useState(true)
-  const authenticateCustomer = (customer, openProfile = false) => {
-    setCustomerSession(customer)
-    if (openProfile) setActiveScreen('Profil')
-  }
   const [isDriverAvailable, setIsDriverAvailable] = useState(true)
   useEffect(() => {
     if (!customerSession) return undefined
@@ -669,8 +948,8 @@ function App() {
     return ''
   })
   const [calculationError, setCalculationError] = useState('')
+  const bookingFormRef = useRef(null)
   const rideStatusesRef = useRef(new Map())
-  const routeControllerRef = useRef(null)
 
   useEffect(() => {
     for (const trip of trips) {
@@ -753,12 +1032,8 @@ function App() {
           const update = updates.find(({ id }) => id === trip.id)
           if (!update) return trip
           const offerChanged = JSON.stringify(trip.offer ?? null) !== JSON.stringify(update.offer ?? null)
-          const updatedPrice = Number.isInteger(update.amountCzk) ? `${update.amountCzk} Kč` : trip.price
-          const updatedPickupFee = update.pickupFeeCzk ?? trip.pickupFeeCzk ?? 0
           return trip.status !== update.status || trip.driverName !== update.driverName || trip.driverPlate !== update.driverPlate || offerChanged
-            || trip.price !== updatedPrice || (trip.pickupFeeCzk ?? 0) !== updatedPickupFee
-            || trip.paid !== update.paid || trip.paymentType !== update.paymentMethod
-            ? { ...trip, status: update.status, driverName: update.driverName, driverPlate: update.driverPlate, driverCarName: update.driverCarName, offer: update.offer ?? null, price: updatedPrice, pickupFeeCzk: updatedPickupFee, paid: update.paid, paymentType: update.paymentMethod }
+            ? { ...trip, status: update.status, driverName: update.driverName, driverPlate: update.driverPlate, driverCarName: update.driverCarName, offer: update.offer ?? null }
             : trip
         }))
       } catch (error) {
@@ -801,10 +1076,23 @@ function App() {
           if (!response.ok) throw new Error(result.error ?? 'Platbu se nepodařilo ověřit.')
           if (!result.paid || !Number.isInteger(result.amountCzk)) throw new Error('Platba ještě nebyla potvrzena.')
 
-          setTrips((currentTrips) => currentTrips.map((trip) => (trip.id === result.rideId
-            ? { ...trip, paid: true, price: `${result.amountCzk} Kč` }
-            : trip)))
-          setNotice(`Platba ${result.amountCzk} Kč proběhla. Řidič je na cestě k vám.`)
+          setTrips((currentTrips) => {
+            if (currentTrips.some((trip) => trip.id === result.rideId)) return currentTrips
+            return [{
+              id: result.rideId,
+              from: result.pickup,
+              to: result.destination,
+              customerName: result.customerName,
+              customerPhone: result.customerPhone,
+              note: result.note,
+              paymentMethod: result.paymentMethod,
+              time: 'Právě teď',
+              price: `${result.amountCzk} Kč`,
+              status: 'pending',
+            }, ...currentTrips]
+          })
+          setNotice(`Platba ${result.amountCzk} Kč proběhla. Objednávka byla odeslána řidičům.`)
+          if (result.notificationWarning) setNotice(`${result.notificationWarning} ${result.amountCzk} Kč objednávka je uložená.`)
         })
         .catch((error) => {
           setNotice(error instanceof Error ? error.message : 'Platbu se nepodařilo ověřit.')
@@ -917,15 +1205,12 @@ function App() {
     }, { enableHighAccuracy: true, timeout: 10000 })
   }
 
-  const getRideEstimate = useCallback(async () => {
+  const getRideEstimate = async () => {
     if (!pickupCoords || !destinationCoords) {
       setCalculationError('Vyberte místo vyzvednutí i cílovou adresu z nabídky pro Českou republiku.')
       return null
     }
 
-    routeControllerRef.current?.abort()
-    const controller = new AbortController()
-    routeControllerRef.current = controller
     setIsCalculating(true)
     setCalculationError('')
     setMapMessage('')
@@ -947,10 +1232,9 @@ function App() {
             pickupCoords: pickupLocation,
             destinationCoords: destinationLocation,
           }),
-          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]),
+          signal: AbortSignal.timeout(20000),
         })
       } catch (error) {
-        if (controller.signal.aborted) throw error
         if (error instanceof DOMException && error.name === 'TimeoutError') {
           throw new Error('Výpočet trasy vypršel. Zkontrolujte připojení a zkuste to znovu.')
         }
@@ -961,7 +1245,6 @@ function App() {
         throw new Error(result.error ?? 'Nepodařilo se vypočítat trasu. Zkuste to prosím znovu.')
       }
       const routeResult = await routeResponse.json()
-      if (controller.signal.aborted) return null
       const routeCoordinates = routeResult.geometry?.coordinates
       const hasValidGeometry = Array.isArray(routeCoordinates)
         && routeCoordinates.length >= 2
@@ -995,28 +1278,13 @@ function App() {
       setEstimatedOriginalPrice(Number.isInteger(routeResult.originalAmountCzk) ? routeResult.originalAmountCzk : price)
       return { distance, price, quoteId: routeResult.quoteId }
     } catch (error) {
-      if (controller.signal.aborted) return null
       const message = error instanceof Error ? error.message : 'Cenu se nepodařilo vypočítat.'
       setCalculationError(message)
       return null
     } finally {
-      if (routeControllerRef.current === controller) {
-        routeControllerRef.current = null
-        setIsCalculating(false)
-      }
+      setIsCalculating(false)
     }
-  }, [pickup, destination, pickupCoords, destinationCoords])
-
-  useEffect(() => {
-    if (!pickupCoords || !destinationCoords) return undefined
-    const timer = window.setTimeout(() => {
-      if (!routeControllerRef.current) void getRideEstimate()
-    }, 0)
-    return () => {
-      window.clearTimeout(timer)
-      routeControllerRef.current?.abort()
-    }
-  }, [pickupCoords, destinationCoords, getRideEstimate])
+  }
 
   const submitBooking = async (event) => {
     event.preventDefault()
@@ -1027,8 +1295,32 @@ function App() {
       : await getRideEstimate()
     if (!estimate) return
 
-    if (paymentChoice === 'card' && paymentGatewayStatus !== 'ready') {
-      setNotice('Platba kartou zatím není aktivní.')
+    if (paymentChoice === 'card') {
+      setIsStartingPayment(true)
+      try {
+        const response = await fetch('/api/payments/checkout-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            quoteId: estimate.quoteId,
+            pickup,
+            destination,
+            note: orderNote,
+          }),
+        })
+        const result = await response.json()
+        if (!response.ok) throw new Error(result.error ?? 'Platbu se nepodařilo připravit.')
+        const checkoutUrl = new URL(result.url)
+        if (checkoutUrl.origin !== 'https://checkout.stripe.com') {
+          throw new Error('Platební brána vrátila neplatný odkaz.')
+        }
+        window.location.assign(checkoutUrl.href)
+        return
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : 'Platbu se nepodařilo připravit.')
+      } finally {
+        setIsStartingPayment(false)
+      }
       return
     }
 
@@ -1042,7 +1334,6 @@ function App() {
           pickup,
           destination,
           note: orderNote,
-          paymentMethod: paymentChoice === 'card' ? 'card' : 'cash',
         }),
       })
       const result = await response.json()
@@ -1054,9 +1345,6 @@ function App() {
         customerName: result.ride.customerName,
         customerPhone: result.ride.customerPhone,
         note: result.ride.note,
-        paymentMethod: result.ride.paymentMethod === 'card' ? 'Karta · Stripe' : undefined,
-        paymentType: result.ride.paymentMethod,
-        paid: result.ride.paid,
         time: 'Právě teď',
         price: `${result.ride.amountCzk} Kč`,
         status: 'pending',
@@ -1085,22 +1373,9 @@ function App() {
       const result = await response.json()
       if (!response.ok) throw new Error(result.error ?? 'Odpověď se nepodařilo odeslat.')
       setTrips((currentTrips) => currentTrips.map((trip) => (trip.id === rideId
-        ? {
-          ...trip,
-          offer: null,
-          ...(action === 'confirm' ? {
-            status: 'accepted',
-            driverName: trip.offer?.driverName,
-            driverPlate: trip.offer?.driverPlate,
-            driverCarName: trip.offer?.driverCarName,
-            ...(Number.isInteger(result.amountCzk) ? { price: `${result.amountCzk} Kč`, pickupFeeCzk: result.pickupFeeCzk ?? 0 } : {}),
-          } : {}),
-        }
+        ? { ...trip, offer: null, ...(action === 'confirm' ? { status: 'accepted', driverName: trip.offer?.driverName, driverPlate: trip.offer?.driverPlate, driverCarName: trip.offer?.driverCarName } : {}) }
         : trip)))
-      setNotice(action === 'confirm'
-        ? (result.pickupFeeCzk > 0 ? `Nabídku jste potvrdili. Celková cena je ${result.amountCzk} Kč včetně přistavení vozidla ${result.pickupFeeCzk} Kč.` : 'Čas jste potvrdili.')
-        : 'Nabídku jste odmítli. Hledáme dalšího řidiče.')
-      if (action === 'confirm' && result.paymentMethod === 'card' && !result.paid) await startCardPayment(rideId)
+      setNotice(action === 'confirm' ? 'Čas jste potvrdili.' : 'Čas jste odmítli. Hledáme dalšího řidiče.')
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Odpověď se nepodařilo odeslat.')
     } finally {
@@ -1108,20 +1383,10 @@ function App() {
     }
   }
 
-  const [isStartingRidePayment, setIsStartingRidePayment] = useState(false)
-  const startCardPayment = async (rideId) => {
-    setIsStartingRidePayment(true)
-    try {
-      const response = await fetch(`/api/rides/${encodeURIComponent(rideId)}/payment`, { method: 'POST' })
-      const result = await response.json()
-      if (!response.ok) throw new Error(result.error ?? 'Platbu se nepodařilo připravit.')
-      const checkoutUrl = new URL(result.url)
-      if (checkoutUrl.origin !== 'https://checkout.stripe.com') throw new Error('Platební brána vrátila neplatný odkaz.')
-      window.location.assign(checkoutUrl.href)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Platbu se nepodařilo připravit.')
-      setIsStartingRidePayment(false)
-    }
+  const calculateRoute = () => {
+    if (!bookingFormRef.current?.reportValidity()) return
+    setNotice('')
+    void getRideEstimate()
   }
 
   const swapRoute = () => {
@@ -1226,13 +1491,6 @@ function App() {
               </div>
               <button className="outline-button profile-edit-button" type="button" onClick={() => { setProfileEmailDraft(profile.email); setProfileNameDraft(profile.name); setIsEditingProfile(true); setNotice('') }}>Upravit profil</button>
               <button className="profile-logout-button" type="button" onClick={signOutCustomer}>Odhlásit se</button>
-              <a
-                className="customer-terms-link"
-                href="https://www.taxikoblizek.cz/vseobecne-obchodni-podminky-vop-pro-uzivani-mobilni-aplikace-a-prepravnich-sluzeb/"
-              >
-                Všeobecné obchodní podmínky
-              </a>
-              <p><strong>VŠEOBECNÉ OBCHODNÍ PODMÍNKY (VOP) PRO UŽÍVÁNÍ MOBILNÍ APLIKACE A PŘEPRAVNÍCH SLUŽEB</strong></p>
             </>
           )}
           {notice && <p className="notice-message" role="status">{notice}</p>}
@@ -1251,36 +1509,9 @@ function App() {
               {activeTrip.offer.driverCarName && <p>Auto: <strong>{activeTrip.offer.driverCarName}</strong></p>}
               {activeTrip.offer.driverPlate && <p>SPZ vozidla: <strong>{activeTrip.offer.driverPlate}</strong></p>}
               <p className="active-ride-eta">Přijede za <strong>{activeTrip.offer.etaMinutes} min</strong></p>
-              {activeTrip.offer.outsidePickupZone && (
-                <div className="pickup-zone-warning" role="alert">
-                  <strong>Nástupní adresa je mimo region taxi</strong>
-                  <p>Naše taxi působí v oblasti Třebechovice pod Orebem a Pohoří u Dobrušky. Za přistavení vozidla na vaši adresu bude celková cena navýšena o {activeTrip.offer.pickupFeeCzk} Kč.</p>
-                  <dl className="pickup-fee-breakdown">
-                    <div><dt>Jízda</dt><dd>{activeTrip.offer.totalAmountCzk - activeTrip.offer.pickupFeeCzk} Kč</dd></div>
-                    <div>
-                      <dt>Přistavení vozidla</dt>
-                      <dd>
-                        {activeTrip.offer.pickupFeeOriginalCzk !== activeTrip.offer.pickupFeeCzk && <s>{activeTrip.offer.pickupFeeOriginalCzk} Kč</s>}
-                        {' '}{activeTrip.offer.pickupFeeCzk} Kč
-                      </dd>
-                    </div>
-                    {activeTrip.offer.pickupFeeOriginalCzk !== activeTrip.offer.pickupFeeCzk && (
-                      <div className="pickup-fee-discount">Na přistavení je uplatněna vaše sleva za počet jízd.</div>
-                    )}
-                    <div className="pickup-fee-total"><dt>Celkem k zaplacení</dt><dd>{activeTrip.offer.totalAmountCzk} Kč</dd></div>
-                  </dl>
-                </div>
-              )}
-              {activeTrip.offer.paymentMethod === 'card' && (
-                <p className="card-after-confirm-note">Po potvrzení vás přesměrujeme na zabezpečenou platbu kartou{activeTrip.offer.totalAmountCzk ? ` (${activeTrip.offer.totalAmountCzk} Kč)` : ''}.</p>
-              )}
               <p className="active-ride-route"><strong>{activeTrip.from}</strong> → <strong>{activeTrip.to}</strong></p>
               <div className="active-ride-buttons">
-                <button className="submit-button" type="button" disabled={isRespondingToOffer || isStartingRidePayment} onClick={() => void respondToOffer(activeTrip.id, 'confirm')}>
-                  {activeTrip.offer.paymentMethod === 'card'
-                    ? `Potvrdit a zaplatit ${activeTrip.offer.totalAmountCzk} Kč`
-                    : activeTrip.offer.outsidePickupZone ? `Potvrdit čas a cenu ${activeTrip.offer.totalAmountCzk} Kč` : 'Potvrdit čas'}
-                </button>
+                <button className="submit-button" type="button" disabled={isRespondingToOffer} onClick={() => void respondToOffer(activeTrip.id, 'confirm')}>Potvrdit čas</button>
                 <button className="outline-button" type="button" disabled={isRespondingToOffer} onClick={() => void respondToOffer(activeTrip.id, 'decline')}>Odmítnout</button>
               </div>
               {notice && <p className="notice-message" role="status">{notice}</p>}
@@ -1303,20 +1534,8 @@ function App() {
               {activeTrip.driverName && <p>Řidič: <strong>{activeTrip.driverName}</strong></p>}
               {activeTrip.driverCarName && <p>Auto: <strong>{activeTrip.driverCarName}</strong></p>}
               {activeTrip.driverPlate && <p>SPZ vozidla: <strong>{activeTrip.driverPlate}</strong></p>}
-              {activeTrip.paymentType === 'card' && !activeTrip.paid ? (
-                <div className="ride-payment-due" role="alert">
-                  <strong>Zbývá zaplatit kartou: {activeTrip.price}</strong>
-                  {activeTrip.pickupFeeCzk > 0 && <p>Částka zahrnuje přistavení vozidla {activeTrip.pickupFeeCzk} Kč.</p>}
-                  <button className="submit-button" type="button" disabled={isStartingRidePayment} onClick={() => void startCardPayment(activeTrip.id)}>
-                    {isStartingRidePayment ? 'Připravuji platbu…' : `Zaplatit ${activeTrip.price}`}
-                  </button>
-                </div>
-              ) : activeTrip.paymentType === 'card' && activeTrip.paid ? (
-                <p>Zaplaceno kartou: <strong>{activeTrip.price}</strong></p>
-              ) : null}
               {activeTrip.status === 'accepted' && <p>Řidič je na cestě k vám.</p>}
               <p className="active-ride-route"><strong>{activeTrip.from}</strong> → <strong>{activeTrip.to}</strong></p>
-              {notice && <p className="notice-message" role="status">{notice}</p>}
             </div>
           )}
         </section>
@@ -1340,7 +1559,7 @@ function App() {
           </div>
         )}
 
-        <form className={`booking-form${isDriverAvailable ? '' : ' is-locked'}`} onSubmit={submitBooking}>
+        <form className={`booking-form${isDriverAvailable ? '' : ' is-locked'}`} ref={bookingFormRef} onSubmit={submitBooking}>
           <fieldset className="booking-lock" disabled={!isDriverAvailable}>
           {discountInfo && (discountInfo.percent > 0 || discountInfo.nextTier || discountInfo.tiers?.length > 0) && (
             <div className="loyalty-box">
@@ -1381,10 +1600,12 @@ function App() {
             />
           </div>
           {(!pickupCoords || !destinationCoords) && (
-            <p className="address-selection-hint">Hledejte adresu nebo místo, například nádraží, školu či nemocnici, a vyberte návrh.</p>
+            <p className="address-selection-hint">Začněte psát město, ulici nebo číslo a vyberte adresu z automatických návrhů.</p>
           )}
           <button className="swap-route" type="button" aria-label="Prohodit místa" onClick={swapRoute} disabled={isCalculating || isStartingPayment}>↕</button>
-          {isCalculating && <p role="status">Počítám trasu a cenu…</p>}
+          <button className="calculate-route-button" type="button" onClick={calculateRoute} disabled={isCalculating}>
+            {isCalculating ? 'Počítám trasu…' : route ? 'Přepočítat trasu a cenu' : 'Vypočítat trasu a cenu'}
+          </button>
 
           <div className="vehicle-heading">
             <h2>Kontakt na vás</h2>
@@ -1426,7 +1647,7 @@ function App() {
               <span>
                 <strong>Platební karta</strong>
                 <small>
-                  {paymentGatewayStatus === 'ready' && 'Bezpečně přes Stripe · zaplatíte po potvrzení řidičem'}
+                  {paymentGatewayStatus === 'ready' && 'Bezpečně přes Stripe · platba ihned'}
                   {paymentGatewayStatus === 'checking' && 'Ověřuji dostupnost platební brány…'}
                   {paymentGatewayStatus === 'not-configured' && 'Zatím není aktivní · použijte hotovost'}
                   {paymentGatewayStatus === 'unavailable' && 'Platební server není dostupný'}
@@ -1455,7 +1676,7 @@ function App() {
               </p>
             )}
             <button type="submit" className="submit-button" disabled={isCalculating || isStartingPayment || !isDriverAvailable}>
-              {isCalculating ? 'Počítám…' : isStartingPayment ? 'Odesílám…' : 'Objednat jízdu'} <span aria-hidden="true">→</span>
+              {isCalculating ? 'Počítám…' : isStartingPayment ? 'Připravuji platbu…' : paymentChoice === 'card' ? 'Objednat a zaplatit' : 'Objednat jízdu'} <span aria-hidden="true">→</span>
             </button>
           </div>
           {notice && <p className="notice-message" role="status">{notice}</p>}
@@ -1474,7 +1695,7 @@ function App() {
   if (isCheckingCustomerSession) {
     return <main className="customer-login-shell"><p className="driver-loading">Ověřuji přihlášení…</p></main>
   }
-  if (!customerSession) return <CustomerLogin onAuthenticated={authenticateCustomer} />
+  if (!customerSession) return <CustomerLogin onAuthenticated={setCustomerSession} />
 
   return (
     <main className="app-shell">
@@ -1490,7 +1711,7 @@ function App() {
       {activeScreen === 'Objednat' && (
         <section className="map-stage" aria-label="Mapa a trasa">
           <div className={`map-status${mapMessage ? ' map-message' : ''}`} role={mapMessage ? 'status' : undefined}>
-            {mapMessage || <><span className="online-dot" />{route ? `${estimatedDistance.toFixed(1)} km · trasa autem` : 'Mapa OpenStreetMap · vyhledávání Mapy.com'}</>}
+            {mapMessage || <><span className="online-dot" />{route ? `${estimatedDistance.toFixed(1)} km · trasa autem` : 'Mapa OpenStreetMap · adresy RÚIAN'}</>}
           </div>
           <PragueMap
             pickupCoords={pickupCoords}

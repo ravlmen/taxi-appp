@@ -22,7 +22,6 @@ import { createTwilioSmsSender, createTwilioVerifySender } from './sms.mjs'
 const app = express()
 const port = Number(process.env.PORT ?? 3000)
 const configuredAppUrl = process.env.APP_BASE_URL ?? process.env.RENDER_EXTERNAL_URL
-const mapyApiKey = process.env.MAPY_API_KEY?.trim()
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null
 const smsSender = createTwilioSmsSender({
   accountSid: process.env.TWILIO_ACCOUNT_SID,
@@ -55,7 +54,7 @@ if (!vapidKeys.publicKey || !vapidKeys.privateKey) {
   driverStore.setSetting('vapid_private_key', generated.privateKey)
 }
 webpush.setVapidDetails(process.env.VAPID_SUBJECT ?? 'mailto:taxi@localhost.invalid', vapidKeys.publicKey, vapidKeys.privateKey)
-const sessionLifetimeMs = 30 * 24 * 60 * 60 * 1000
+const sessionLifetimeMs = 12 * 60 * 60 * 1000
 const driverSessions = new Map()
 const customerSessions = new Map()
 const loginAttempts = new Map()
@@ -64,10 +63,6 @@ const customerLoginAttempts = new Map()
 const passwordSalt = randomBytes(32)
 const isProduction = process.env.NODE_ENV === 'production'
 const minimumPasswordLength = Math.max(4, Number.parseInt(process.env.DRIVER_MIN_PASSWORD_LENGTH ?? '', 10) || (isProduction ? 12 : 4))
-const pajaCustomerUsername = process.env.PAJA_CUSTOMER_USERNAME ?? 'paja'
-const pajaCustomerPassword = process.env.PAJA_CUSTOMER_PASSWORD
-const pajaCustomerPhone = normalizePhone(process.env.PAJA_CUSTOMER_PHONE ?? '')
-const pajaCustomerName = process.env.PAJA_CUSTOMER_NAME ?? 'Paja'
 const configuredDrivers = [
   {
     id: 'driver-1',
@@ -114,12 +109,6 @@ const areDriverUsernamesUnique = new Set(
 ).size === configuredDriverAccounts.length
 const areDriverAccountsConfigured = configuredDriverAccounts.some(({ id }) => id === 'driver-owner')
   && areDriverUsernamesUnique
-const pajaCustomerPasswordHash = pajaCustomerPassword
-  ? scryptSync(pajaCustomerPassword, passwordSalt, 64)
-  : null
-const isPajaCustomerConfigured = Boolean(
-  pajaCustomerPasswordHash && isValidPhone(pajaCustomerPhone) && isValidCustomerName(pajaCustomerName),
-)
 const passwordForUnknownUser = scryptSync(randomBytes(32), passwordSalt, 64)
 const scrypt = (password, salt, keyLength) => new Promise((resolve, reject) => {
   scryptCallback(password, salt, keyLength, (error, derivedKey) => {
@@ -277,65 +266,6 @@ function isValidCoordinate(coordinates) {
   )
 }
 
-app.get('/api/places/suggest', async (request, response) => {
-  const query = typeof request.query.query === 'string' ? request.query.query.trim() : ''
-  if (query.length < 3 || query.length > 150) {
-    response.status(400).json({ error: 'Dotaz musí obsahovat 3 až 150 znaků.' })
-    return
-  }
-  if (!mapyApiKey) {
-    response.status(503).json({ error: 'Vyhledávání přes Mapy.com není nakonfigurované. Provozovatel musí nastavit MAPY_API_KEY.' })
-    return
-  }
-
-  const url = new URL('https://api.mapy.com/v1/suggest')
-  url.searchParams.set('query', query)
-  url.searchParams.set('lang', 'cs')
-  url.searchParams.set('limit', '15')
-  url.searchParams.set('locality', 'cz')
-  url.searchParams.append('type', 'regional')
-  url.searchParams.append('type', 'poi')
-
-  let mapyResponse
-  try {
-    mapyResponse = await fetch(url, {
-      headers: { 'X-Mapy-Api-Key': mapyApiKey },
-      signal: AbortSignal.timeout(10000),
-    })
-  } catch (error) {
-    console.error('Nepodařilo se spojit s API Mapy.com:', error)
-    response.status(error instanceof DOMException && error.name === 'TimeoutError' ? 504 : 502)
-      .json({ error: 'Mapy.com teď neodpovídají. Zkuste hledání za chvíli znovu.' })
-    return
-  }
-
-  if (!mapyResponse.ok) {
-    console.error(`API Mapy.com vrátilo stav ${mapyResponse.status}.`)
-    const error = mapyResponse.status === 401 || mapyResponse.status === 403
-      ? 'API klíč Mapy.com není platný nebo nemá oprávnění. Zkontrolujte MAPY_API_KEY.'
-      : mapyResponse.status === 429
-        ? 'Byl dosažen limit vyhledávání Mapy.com. Zkuste to prosím později.'
-        : 'Vyhledávání přes Mapy.com teď není dostupné.'
-    response.status(502).json({ error })
-    return
-  }
-
-  let result
-  try {
-    result = await mapyResponse.json()
-  } catch (error) {
-    console.error('API Mapy.com vrátilo neplatný JSON:', error)
-    response.status(502).json({ error: 'Mapy.com vrátily neplatnou odpověď.' })
-    return
-  }
-  if (!result || !Array.isArray(result.items)) {
-    console.error('API Mapy.com vrátilo neočekávaný formát výsledků.')
-    response.status(502).json({ error: 'Mapy.com vrátily neplatné výsledky.' })
-    return
-  }
-  response.json({ items: result.items })
-})
-
 function getDriverSession(request) {
   const cookie = request.get('cookie') ?? ''
   const token = cookie.match(/(?:^|;\s*)taxi_driver_session=([a-f\d]{64})(?:;|$)/i)?.[1]
@@ -425,11 +355,8 @@ function formatApiRide(ride) {
     customerName: ride.customerName,
     customerPhone: ride.customerPhone,
     amountCzk: ride.amountCzk,
-    pickupFeeCzk: ride.pickupFeeCzk ?? 0,
-    pickupFeeOriginalCzk: ride.pickupFeeOriginalCzk ?? 0,
     distanceMeters: ride.distanceMeters,
     paymentMethod: ride.paymentMethod,
-    paid: Boolean(ride.paidAt),
     status: ride.status,
     createdAt: ride.createdAt,
     acceptedAt: ride.acceptedAt,
@@ -550,14 +477,9 @@ app.post('/api/rides', async (request, response) => {
     response.status(400).json({ error: 'Poznámka může obsahovat nejvýše 500 znaků.' })
     return
   }
-  const paymentMethod = body.paymentMethod === 'card' ? 'card' : 'cash'
-  if (paymentMethod === 'card' && !stripe) {
-    response.status(503).json({ error: 'Platba kartou zatím není aktivní. Provozovatel musí nastavit Stripe.' })
-    return
-  }
   const { quoteId, quote } = result
   try {
-    const rideInput = {
+    const ride = rideStore.createCashRide({
       id: randomUUID(),
       pickup: quote.pickup,
       destination: quote.destination,
@@ -568,8 +490,7 @@ app.post('/api/rides', async (request, response) => {
       amountCzk: quote.amountCzk,
       distanceMeters: quote.distanceMeters,
       createdAt: new Date().toISOString(),
-    }
-    const ride = paymentMethod === 'card' ? rideStore.createCardRide(rideInput) : rideStore.createCashRide(rideInput)
+    })
     routeQuotes.delete(quoteId)
     const notificationWarning = await notifyDriversOfRide(ride)
     response.status(201).json({ ride: formatApiRide(ride), notificationWarning })
@@ -599,26 +520,11 @@ app.get('/api/rides/:id/status', (request, response) => {
     : null
   response.json({
     status: rejected ? 'rejected' : ride.status,
-    amountCzk: ride.amountCzk,
-    pickupFeeCzk: ride.pickupFeeCzk ?? 0,
-    pickupFeeOriginalCzk: ride.pickupFeeOriginalCzk ?? 0,
-    paymentMethod: ride.paymentMethod,
-    paid: Boolean(ride.paidAt),
     driverName: assignedDriver?.name ?? null,
     driverPlate: assignedDriver?.plate || null,
     driverCarName: assignedDriver?.carName || null,
     offer: offerDriver
-      ? {
-        driverName: offerDriver.name,
-        driverPlate: offerDriver.plate || null,
-        driverCarName: offerDriver.carName || null,
-        etaMinutes: ride.offerEtaMinutes,
-        outsidePickupZone: ride.offerPickupFeeOriginalCzk !== null,
-        pickupFeeCzk: ride.offerPickupFeeCzk ?? 0,
-        pickupFeeOriginalCzk: ride.offerPickupFeeOriginalCzk ?? 0,
-        totalAmountCzk: ride.amountCzk + (ride.offerPickupFeeCzk ?? 0),
-        paymentMethod: ride.paymentMethod,
-      }
+      ? { driverName: offerDriver.name, driverPlate: offerDriver.plate || null, driverCarName: offerDriver.carName || null, etaMinutes: ride.offerEtaMinutes }
       : null,
   })
 })
@@ -650,16 +556,7 @@ function handleOfferResponse(action) {
     if (action === 'decline') {
       void pushToDrivers({ title: 'Nová objednávka – Taxi Koblížek', body: `${ride.pickup} → ${ride.destination}, ${ride.amountCzk} Kč`, tag: `ride-${ride.id}`, url: '/ridic' })
     }
-    response.json(action === 'confirm'
-      ? {
-        ok: true,
-        amountCzk: done.amountCzk,
-        pickupFeeCzk: done.pickupFeeCzk ?? 0,
-        pickupFeeOriginalCzk: done.pickupFeeOriginalCzk ?? 0,
-        paymentMethod: done.paymentMethod,
-        paid: Boolean(done.paidAt),
-      }
-      : { ok: true })
+    response.json({ ok: true })
   }
 }
 
@@ -703,64 +600,6 @@ app.post('/api/rides/:id/offer/decline', handleOfferResponse('decline'))
 app.get('/api/customer/session', (request, response) => {
   const customer = getCustomerSession(request)
   response.json({ customer: customer ? { phone: customer.phone, name: customer.name } : null })
-})
-
-app.post('/api/customer/password-login', (request, response) => {
-  if (!isAllowedAppOrigin(request)) {
-    response.status(403).json({ error: 'Požadavek pochází z neznámé adresy.' })
-    return
-  }
-  if (!isPajaCustomerConfigured) {
-    response.status(503).json({ error: 'Zákaznický účet Paja není nakonfigurovaný.' })
-    return
-  }
-
-  const address = request.ip ?? request.socket.remoteAddress ?? 'unknown'
-  const attempt = customerLoginAttempts.get(address)
-  if (attempt?.blockedUntil > Date.now()) {
-    response.status(429).json({ error: 'Příliš mnoho pokusů. Zkuste to znovu za 15 minut.' })
-    return
-  }
-
-  const { username, password } = request.body ?? {}
-  const validInput = typeof username === 'string'
-    && username.length <= 100
-    && typeof password === 'string'
-    && password.length <= 200
-  const usernameMatches = validInput
-    && username.trim().toLocaleLowerCase('cs-CZ') === pajaCustomerUsername.trim().toLocaleLowerCase('cs-CZ')
-  let providedHash
-  try {
-    providedHash = scryptSync(validInput ? password : '', passwordSalt, 64)
-  } catch (error) {
-    console.error('Nepodařilo se ověřit přihlášení zákaznického účtu:', error)
-    response.status(500).json({ error: 'Přihlášení je dočasně nedostupné.' })
-    return
-  }
-  const passwordMatches = timingSafeEqual(providedHash, pajaCustomerPasswordHash ?? passwordForUnknownUser)
-  if (!usernameMatches || !passwordMatches) {
-    const failures = (attempt?.failures ?? 0) + 1
-    customerLoginAttempts.set(address, {
-      failures: failures % 5,
-      blockedUntil: failures >= 5 ? Date.now() + 15 * 60 * 1000 : 0,
-    })
-    response.status(401).json({ error: 'Uživatelské jméno nebo heslo není správné.' })
-    return
-  }
-
-  customerLoginAttempts.delete(address)
-  const now = Date.now()
-  const token = randomBytes(32).toString('hex')
-  for (const [sessionToken, session] of customerSessions) {
-    if (session.expiresAt <= now) customerSessions.delete(sessionToken)
-  }
-  customerSessions.set(token, {
-    phone: pajaCustomerPhone,
-    name: pajaCustomerName,
-    expiresAt: now + sessionLifetimeMs,
-  })
-  setSessionCookie(response, 'taxi_customer_session', token)
-  response.json({ customer: { phone: pajaCustomerPhone, name: pajaCustomerName } })
 })
 
 app.post('/api/customer/request-code', async (request, response) => {
@@ -1427,44 +1266,21 @@ app.post('/api/driver/rides/:id/accept', async (request, response) => {
     response.status(400).json({ error: 'Zadejte, za kolik minut tam budete (1 až 180).' })
     return
   }
-  const outsidePickupZone = request.body?.outsidePickupZone === true
-  if (request.body?.outsidePickupZone !== undefined && typeof request.body.outsidePickupZone !== 'boolean') {
-    response.status(400).json({ error: 'Označte, zda je nástupní adresa v nástupní zóně.' })
-    return
-  }
-  const pickupFeeInput = Number(request.body?.pickupFeeCzk)
-  if (outsidePickupZone && (!Number.isInteger(pickupFeeInput) || pickupFeeInput < 1 || pickupFeeInput > 10000)) {
-    response.status(400).json({ error: 'Zadejte částku za přistavení vozidla (1 až 10 000 Kč).' })
-    return
-  }
-  const pendingRide = rideStore.getRide(request.params.id)
-  let pickupFee = null
-  if (outsidePickupZone && pendingRide) {
-    const discountPercent = getDiscountInfo(normalizePhone(pendingRide.customerPhone)).percent
-    pickupFee = {
-      originalAmountCzk: pickupFeeInput,
-      amountCzk: discountPercent ? Math.max(1, Math.round(pickupFeeInput * (100 - discountPercent) / 100)) : pickupFeeInput,
-    }
-  }
-  const ride = rideStore.offerRide(request.params.id, session.driverId, etaMinutes, pickupFee)
+  const ride = rideStore.offerRide(request.params.id, session.driverId, etaMinutes)
   if (!ride) {
     response.status(409).json({ error: 'Tuto jízdu už nabídl jiný řidič nebo už není volná.' })
     return
   }
   const driver = driverAccounts.find(({ id }) => id === session.driverId)
-  const totalAmountCzk = ride.amountCzk + (pickupFee?.amountCzk ?? 0)
-  const pickupFeeText = pickupFee
-    ? ` Nástupní adresa je mimo region taxi (Třebechovice pod Orebem, Pohoří u Dobrušky). Přistavení vozidla ${pickupFee.amountCzk} Kč${pickupFee.amountCzk !== pickupFee.originalAmountCzk ? ` po slevě (původně ${pickupFee.originalAmountCzk} Kč)` : ''}, celkem ${totalAmountCzk} Kč.`
-    : ''
   void pushToCustomer(ride.customerPhone, {
     title: `Řidič ${driver?.name ?? ''} přijede za ${etaMinutes} min`.replace('  ', ' '),
-    body: `${driver?.carName ? `${driver.carName}. ` : ''}${driver?.plate ? `SPZ ${driver.plate}. ` : ''}${pickupFee ? `Přistavení vozidla ${pickupFee.amountCzk} Kč, celkem ${totalAmountCzk} Kč. ` : ''}Otevřete aplikaci a potvrďte ${pickupFee ? 'nabídku' : 'čas'}.`,
+    body: `${driver?.carName ? `${driver.carName}. ` : ''}${driver?.plate ? `SPZ ${driver.plate}. ` : ''}Otevřete aplikaci a potvrďte čas.`,
     tag: `ride-${ride.id}`,
     url: '/',
   })
   const notificationWarning = await notifyBySms(
     [ride.customerPhone],
-    `Taxi Koblížek: Řidič${driver?.name ? ` ${driver.name}` : ''}${driver?.carName ? `, ${driver.carName}` : ''}${driver?.plate ? `, SPZ ${driver.plate}` : ''} k vám přijede za ${etaMinutes} min.${pickupFeeText} Potvrďte nebo odmítněte to v aplikaci.`,
+    `Taxi Koblížek: Řidič${driver?.name ? ` ${driver.name}` : ''}${driver?.carName ? `, ${driver.carName}` : ''}${driver?.plate ? `, SPZ ${driver.plate}` : ''} k vám přijede za ${etaMinutes} min. Potvrďte nebo odmítněte to v aplikaci.`,
     `Nabídka času zákazníkovi k jízdě ${ride.id}`,
   ) ? null : 'Čas je odeslaný zákazníkovi v aplikaci, ale SMS se nepodařilo odeslat.'
   response.json({ ride: formatApiRide(ride), notificationWarning })
@@ -1515,57 +1331,84 @@ app.get('/api/payments/status', (_request, response) => {
   response.json({ enabled: Boolean(stripe) })
 })
 
-app.post('/api/rides/:id/payment', async (request, response) => {
+app.post('/api/payments/checkout-session', async (request, response) => {
   if (!stripe) {
     response.status(503).json({ error: 'Platba kartou zatím není aktivní. Provozovatel musí nastavit Stripe.' })
     return
   }
+
+  const requestOrigin = request.get('origin')
   if (!isAllowedAppOrigin(request)) {
     response.status(403).json({ error: 'Požadavek na platbu pochází z neznámé adresy.' })
     return
   }
+
   const customer = requireCustomer(request, response)
   if (!customer) return
-  const ride = rideStore.getRide(request.params.id)
-  if (!ride || normalizePhone(ride.customerPhone) !== customer.phone) {
-    response.status(404).json({ error: 'Objednávka nebyla nalezena.' })
+  if (!hasOnlineDriver()) {
+    response.status(503).json({ error: noDriverMessage })
     return
   }
-  if (ride.paymentMethod !== 'card' || ride.paidAt) {
-    response.status(409).json({ error: 'Tato jízda už je zaplacená nebo se platí hotově.' })
+  const { quoteId, pickup, destination, note = '' } = request.body ?? {}
+  const customerName = customer.name
+  if (
+    !isValidAddress(pickup)
+    || !isValidAddress(destination)
+    || !isValidCustomerName(customerName)
+    || typeof note !== 'string'
+    || note.length > 500
+  ) {
+    response.status(400).json({ error: 'Zkontrolujte adresy a kontaktní údaje.' })
     return
   }
-  if (!['accepted', 'to_pickup', 'with_customer', 'completed'].includes(ride.status)) {
-    response.status(409).json({ error: 'Zaplatit lze až po potvrzení nabídky řidiče.' })
+
+  const quote = typeof quoteId === 'string' ? routeQuotes.get(quoteId) : null
+  if (
+    !quote
+    || quote.expiresAt <= Date.now()
+    || quote.pickup !== pickup
+    || quote.destination !== destination
+  ) {
+    if (quote && quote.expiresAt <= Date.now()) routeQuotes.delete(quoteId)
+    response.status(409).json({ error: 'Cenová nabídka vypršela. Přepočítejte prosím trasu.' })
     return
   }
 
   try {
-    const baseUrl = request.get('origin')
-    const description = ride.pickupFeeCzk > 0
-      ? `${ride.pickup} → ${ride.destination} (vč. přistavení vozidla ${ride.pickupFeeCzk} Kč)`
-      : `${ride.pickup} → ${ride.destination}`
+    const baseUrl = requestOrigin
     const checkoutSession = await stripe.checkout.sessions.create({
       mode: 'payment',
       locale: 'cs',
       payment_method_types: ['card'],
-      client_reference_id: ride.id,
       line_items: [{
         quantity: 1,
         price_data: {
           currency: 'czk',
-          unit_amount: ride.amountCzk * 100,
+          unit_amount: quote.amountCzk * 100,
           product_data: {
             name: 'Jízda Taxi Koblížek',
-            description: description.slice(0, 500),
+            description: 'Jízda taxi v České republice',
           },
         },
       }],
-      metadata: { rideId: ride.id },
+      metadata: {
+        pickup,
+        destination,
+        customerName,
+        note: note.trim(),
+        customerPhone: customer.phone,
+        distanceMeters: String(quote.distanceMeters),
+        pickupLat: String(quote.pickupCoords.lat),
+        pickupLon: String(quote.pickupCoords.lon),
+        destinationLat: String(quote.destinationCoords.lat),
+        destinationLon: String(quote.destinationCoords.lon),
+      },
       success_url: `${baseUrl}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/?payment=cancelled`,
     })
+
     if (!checkoutSession.url) throw new Error('Stripe nevytvořil platební stránku.')
+    routeQuotes.delete(quoteId)
     response.json({ url: checkoutSession.url })
   } catch (error) {
     console.error('Nepodařilo se vytvořit Stripe Checkout Session:', error)
@@ -1587,32 +1430,69 @@ app.get('/api/payments/session', async (request, response) => {
 
   try {
     const session = await stripe.checkout.sessions.retrieve(sessionId)
-    const rideId = session.metadata?.rideId
+    const distanceMeters = Number(session.metadata?.distanceMeters)
+    const pickupCoords = {
+      lat: Number(session.metadata?.pickupLat),
+      lon: Number(session.metadata?.pickupLon),
+    }
+    const destinationCoords = {
+      lat: Number(session.metadata?.destinationLat),
+      lon: Number(session.metadata?.destinationLon),
+    }
     if (
       session.status !== 'complete'
       || session.payment_status !== 'paid'
       || session.currency !== 'czk'
       || !Number.isInteger(session.amount_total)
-      || typeof rideId !== 'string'
+      || !session.metadata?.pickup
+      || !session.metadata?.destination
+      || typeof session.metadata?.customerName !== 'string'
+      || session.metadata.customerName.trim().length < 2
+      || session.metadata.customerName.length > 100
+      || (session.metadata?.note !== undefined
+        && (typeof session.metadata.note !== 'string' || session.metadata.note.length > 500))
+      || !isValidPhone(normalizePhone(session.metadata?.customerPhone))
+      || !Number.isFinite(distanceMeters)
+      || distanceMeters <= 0
+      || !isValidCoordinate(pickupCoords)
+      || !isValidCoordinate(destinationCoords)
     ) {
       response.status(402).json({ error: 'Platba ještě nebyla potvrzena.' })
       return
     }
-    const amountCzk = session.amount_total / 100
-    const ride = rideStore.markRidePaid(rideId, session.id, amountCzk)
-    if (!ride || !ride.paidAt || ride.paymentSessionId !== session.id) {
-      response.status(409).json({ error: 'Platbu se nepodařilo přiřadit k jízdě. Kontaktujte prosím provozovatele.' })
-      return
-    }
-    if (ride.newlyPaid && ride.driverId) {
-      void pushToDriver(ride.driverId, {
-        title: 'Zákazník zaplatil kartou',
-        body: `${ride.pickup} → ${ride.destination}, ${amountCzk} Kč`,
-        tag: `ride-${ride.id}`,
-        url: '/ridic',
-      })
-    }
-    response.json({ paid: true, rideId: ride.id, amountCzk })
+
+    const ride = rideStore.createPaidRide({
+      id: randomUUID(),
+      paymentSessionId: session.id,
+      pickup: session.metadata.pickup,
+      destination: session.metadata.destination,
+      note: session.metadata.note ?? '',
+      customerName: session.metadata.customerName,
+      customerPhone: session.metadata.customerPhone,
+      routeGeometry: {
+        type: 'LineString',
+        coordinates: [
+          [pickupCoords.lon, pickupCoords.lat],
+          [destinationCoords.lon, destinationCoords.lat],
+        ],
+      },
+      amountCzk: session.amount_total / 100,
+      distanceMeters,
+      createdAt: new Date(session.created * 1000).toISOString(),
+    })
+    const notificationWarning = ride.created ? await notifyDriversOfRide(ride) : null
+    response.json({
+      paid: true,
+      amountCzk: session.amount_total / 100,
+      pickup: session.metadata.pickup,
+      destination: session.metadata.destination,
+      note: session.metadata.note ?? '',
+      customerName: session.metadata.customerName,
+      customerPhone: session.metadata.customerPhone,
+      rideId: ride.id,
+      paymentMethod: 'Karta · Stripe',
+      notificationWarning,
+    })
   } catch (error) {
     console.error('Nepodařilo se ověřit Stripe Checkout Session:', error)
     response.status(502).json({ error: 'Stav platby se nepodařilo ověřit.' })

@@ -400,22 +400,23 @@
   line-height: 1.45;
 }
 
-.mapy-attribution {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 7px;
-  padding: 7px 10px;
-  border-top: 1px solid #f0f2ee;
-  color: #77847a;
-  font-size: 9px;
-  text-decoration: none;
+.load-more-addresses {
+  position: sticky;
+  bottom: 0;
+  width: 100%;
+  min-height: 39px;
+  border: 0;
+  border-top: 1px solid #e5eae1;
+  background: #f7faf4;
+  color: #49653a;
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
 }
 
-.mapy-attribution img {
-  display: block;
-  width: 58px;
-  max-height: 20px;
+.load-more-addresses:disabled {
+  color: #8c9886;
+  cursor: wait;
 }
 
 .address-selection-hint {
@@ -1258,7 +1259,7 @@
   width: 100%;
 }
 
-.customer-terms-link {
+.customer-driver-login {
   display: block;
   margin-top: 20px;
   padding-top: 16px;
@@ -1270,11 +1271,11 @@
   text-decoration: none;
 }
 
-.customer-terms-link:hover {
+.customer-driver-login:hover {
   text-decoration: underline;
 }
 
-.customer-terms-link:focus-visible {
+.customer-driver-login:focus-visible {
   border-radius: 4px;
   outline: 3px solid #d7a833;
   outline-offset: 3px;
@@ -2073,18 +2074,6 @@
 @keyframes active-ride-spin{to{transform:rotate(360deg)}}
 
 .active-ride-eta{font-size:1.3rem}
-.pickup-zone-warning{margin:12px 0;padding:14px;border:1px solid #e9a23b;border-radius:14px;background:#fff6e5;color:#4a3410;text-align:left}
-.pickup-zone-warning>strong{display:block;margin-bottom:6px;color:#9a4b00}
-.pickup-zone-warning p{margin:0 0 10px;font-size:.9rem}
-.pickup-fee-breakdown{display:grid;gap:6px;margin:0}
-.pickup-fee-breakdown>div{display:flex;justify-content:space-between;gap:12px}
-.pickup-fee-breakdown dt,.pickup-fee-breakdown dd{margin:0}
-.pickup-fee-breakdown s{opacity:.6;margin-right:4px}
-.pickup-fee-breakdown .pickup-fee-discount{display:block;font-size:.8rem;color:#2f7a32}
-.pickup-fee-total{padding-top:6px;border-top:1px solid #e9cf9f;font-weight:800;font-size:1.05rem}
-.card-after-confirm-note{margin:8px 0;font-size:.9rem;font-weight:700}
-.ride-payment-due{display:grid;gap:8px;margin:12px 0;padding:14px;border:1px solid #e9a23b;border-radius:14px;background:#fff6e5;color:#4a3410}
-.ride-payment-due p{margin:0;font-size:.9rem}
 .active-ride-buttons{display:grid;gap:10px;width:100%;max-width:320px;margin-top:8px}
 
 .no-driver-banner{margin:0 0 14px;padding:12px 14px;border-radius:12px;font-weight:600;text-align:center}

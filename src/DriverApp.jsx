@@ -166,12 +166,6 @@ function DriverRideMap({ geometry, pickup, destination }) {
 
 function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance }) {
   const [etaMinutes, setEtaMinutes] = useState('10')
-  const [inPickupZone, setInPickupZone] = useState(null)
-  const [pickupFeeCzk, setPickupFeeCzk] = useState('')
-  const etaValue = Number(etaMinutes)
-  const feeValue = Number(pickupFeeCzk)
-  const canSubmitOffer = Number.isInteger(etaValue) && etaValue >= 1 && etaValue <= 180
-    && (inPickupZone === true || (inPickupZone === false && Number.isInteger(feeValue) && feeValue >= 1 && feeValue <= 10000))
   const mapsUrl = new URL('https://www.google.com/maps/dir/')
   mapsUrl.searchParams.set('api', '1')
   mapsUrl.searchParams.set('origin', ride.pickup)
@@ -184,9 +178,6 @@ function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance 
         <div>
           <p className="driver-ride-time">{formatCreatedAt(ride.createdAt)}</p>
           <strong className="driver-ride-price">{ride.amountCzk} Kč</strong>
-          {assigned && ride.pickupFeeCzk > 0 && (
-            <span className="driver-pickup-fee-note">vč. přistavení {ride.pickupFeeCzk} Kč</span>
-          )}
         </div>
         <span className={`driver-ride-status status-${ride.status}`}>
           {statusLabels[ride.status] ?? 'Nová objednávka'}
@@ -199,7 +190,7 @@ function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance 
       <DriverRideMap geometry={ride.routeGeometry} pickup={ride.pickup} destination={ride.destination} />
       <div className="driver-ride-meta">
         <span>{ride.distanceMeters ? `${(ride.distanceMeters / 1000).toFixed(1)} km` : 'Vzdálenost dle trasy'}</span>
-        <span>{ride.paymentMethod === 'card' ? (ride.paid ? 'Zaplaceno kartou' : assigned ? 'Čeká na platbu kartou' : 'Karta – platba po potvrzení') : 'Platba hotově'}</span>
+        <span>{ride.paymentMethod === 'card' ? 'Zaplaceno kartou' : 'Platba hotově'}</span>
       </div>
       {!assigned && ride.customerPhone && (
         <div className="driver-customer-contact">
@@ -248,35 +239,6 @@ function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance 
               disabled={busy}
             />
           </label>
-          <fieldset className="driver-zone-field" disabled={busy}>
-            <legend>Je nástupní adresa v nástupní zóně?</legend>
-            <div className="driver-zone-options">
-              <label className={inPickupZone === true ? 'selected' : ''}>
-                <input type="radio" name={`zone-${ride.id}`} checked={inPickupZone === true} onChange={() => setInPickupZone(true)} />
-                Ano, v zóně
-              </label>
-              <label className={inPickupZone === false ? 'selected' : ''}>
-                <input type="radio" name={`zone-${ride.id}`} checked={inPickupZone === false} onChange={() => setInPickupZone(false)} />
-                Ne, mimo zónu
-              </label>
-            </div>
-            {inPickupZone === false && (
-              <label className="driver-eta-field driver-pickup-fee-field">
-                <span>Přistavení vozidla (Kč)</span>
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  min="1"
-                  max="10000"
-                  value={pickupFeeCzk}
-                  onChange={(event) => setPickupFeeCzk(event.target.value)}
-                  placeholder="např. 150"
-                  autoFocus
-                />
-                <small>Zákazník uvidí čas a upozornění, že celková cena bude navýšena o tuto částku (po jeho slevě za počet jízd).</small>
-              </label>
-            )}
-          </fieldset>
           <button
             className="driver-secondary-action"
             type="button"
@@ -288,10 +250,10 @@ function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance 
           <button
             className="driver-primary-action"
             type="button"
-            onClick={() => onAccept(ride, Number(etaMinutes), inPickupZone === false ? Number(pickupFeeCzk) : null)}
-            disabled={busy || !canSubmitOffer}
+            onClick={() => onAccept(ride, Number(etaMinutes))}
+            disabled={busy || !(Number(etaMinutes) >= 1 && Number(etaMinutes) <= 180)}
           >
-            {busy ? 'Odesílám…' : inPickupZone === false ? 'Přijmout a odeslat čas + přistavení' : 'Přijmout a odeslat čas'}
+            {busy ? 'Odesílám…' : 'Přijmout a odeslat čas'}
           </button>
         </div>
       )}
@@ -1199,14 +1161,7 @@ export default function DriverApp() {
                   key={ride.id}
                   ride={ride}
                   busy={busyRideId === ride.id}
-                  onAccept={(item, minutes, pickupFee) => void performRideAction(
-                    item,
-                    'accept',
-                    pickupFee ? { etaMinutes: minutes, outsidePickupZone: true, pickupFeeCzk: pickupFee } : { etaMinutes: minutes, outsidePickupZone: false },
-                    pickupFee
-                      ? `Čas a přistavení vozidla ${pickupFee} Kč (před slevou zákazníka) byly odeslány zákazníkovi. Jízda je vaše, jakmile je potvrdí.`
-                      : 'Čas příjezdu byl odeslán zákazníkovi. Jízda je vaše, jakmile ho potvrdí.',
-                  )}
+                  onAccept={(item, minutes) => void performRideAction(item, 'accept', { etaMinutes: minutes }, 'Čas příjezdu byl odeslán zákazníkovi. Jízda je vaše, jakmile ho potvrdí.')}
                   onReject={(item) => void performRideAction(item, 'reject', null, 'Objednávka byla skryta z vašich volných jízd.')}
                 />
               ))}
