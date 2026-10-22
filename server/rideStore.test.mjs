@@ -45,6 +45,41 @@ test('driver offers an arrival time and the customer confirms or declines it', (
   }
 })
 
+test('out-of-zone pickup fee is added only after the customer confirms the offer', () => {
+  const store = createRideStore()
+  try {
+    store.createCashRide(makeRide())
+    const offered = store.offerRide('ride-1', 'driver-1', 7, { amountCzk: 180, originalAmountCzk: 200 })
+    assert.equal(offered.offerPickupFeeCzk, 180)
+    assert.equal(offered.offerPickupFeeOriginalCzk, 200)
+    assert.equal(offered.amountCzk, 500)
+    assert.equal(store.declineOffer('ride-1'), true)
+    const declined = store.getRide('ride-1')
+    assert.equal(declined.offerPickupFeeCzk, null)
+    assert.equal(declined.amountCzk, 500)
+    store.offerRide('ride-1', 'driver-2', 5, { amountCzk: 150, originalAmountCzk: 150 })
+    const accepted = store.confirmOffer('ride-1')
+    assert.equal(accepted.amountCzk, 650)
+    assert.equal(accepted.pickupFeeCzk, 150)
+    assert.equal(accepted.pickupFeeOriginalCzk, 150)
+  } finally {
+    store.close()
+  }
+})
+
+test('in-zone offer keeps the original ride price', () => {
+  const store = createRideStore()
+  try {
+    store.createCashRide(makeRide())
+    store.offerRide('ride-1', 'driver-1', 7)
+    const accepted = store.confirmOffer('ride-1')
+    assert.equal(accepted.amountCzk, 500)
+    assert.equal(accepted.pickupFeeCzk, 0)
+  } finally {
+    store.close()
+  }
+})
+
 test('persists a cash ride for both driver accounts to see', () => {
   const store = createRideStore()
   try {
@@ -227,20 +262,22 @@ test('last-30-day owner stats count and sum only recently completed rides', () =
   }
 })
 
-test('a Stripe session can only create one ride', () => {
+test('card ride is paid only after the customer confirms the offer', () => {
   const store = createRideStore()
   try {
-    const paymentRide = makeRide({
-      id: 'ride-card-1',
-      paymentSessionId: 'cs_test_example',
-      note: 'Vchod je ze dvora.',
-    })
-    const created = store.createPaidRide(paymentRide)
-    const duplicate = store.createPaidRide({ ...paymentRide, id: 'ride-card-2' })
-    assert.equal(created.id, 'ride-card-1')
-    assert.equal(duplicate.id, 'ride-card-1')
-    assert.equal(store.listAvailableRides('driver-1').length, 1)
+    const ride = store.createCardRide(makeRide({ id: 'ride-card-1', note: 'Vchod je ze dvora.' }))
+    assert.equal(ride.paymentMethod, 'card')
+    assert.equal(ride.paidAt, null)
     assert.equal(store.listAvailableRides('driver-1')[0].note, 'Vchod je ze dvora.')
+    assert.equal(store.markRidePaid('ride-card-1', 'cs_test_early', 500).newlyPaid, false)
+    store.offerRide('ride-card-1', 'driver-1', 6, { amountCzk: 100, originalAmountCzk: 100 })
+    store.confirmOffer('ride-card-1')
+    assert.equal(store.markRidePaid('ride-card-1', 'cs_test_wrong', 500).newlyPaid, false)
+    const paid = store.markRidePaid('ride-card-1', 'cs_test_example', 600)
+    assert.equal(paid.newlyPaid, true)
+    assert.equal(paid.paymentSessionId, 'cs_test_example')
+    assert.ok(paid.paidAt)
+    assert.equal(store.markRidePaid('ride-card-1', 'cs_test_example', 600).newlyPaid, false)
   } finally {
     store.close()
   }

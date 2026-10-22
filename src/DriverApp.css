@@ -1115,6 +1115,14 @@
 .driver-eta-actions{flex-wrap:wrap}
 .driver-eta-field{display:grid;gap:4px;flex:1 1 100%;font-size:.85rem}
 .driver-eta-field input{padding:10px;border-radius:10px;border:1px solid rgba(128,128,128,.4);font-size:1.1rem;width:100%;box-sizing:border-box}
+.driver-zone-field{flex:1 1 100%;display:grid;gap:8px;margin:0;padding:0;border:0;min-width:0}
+.driver-zone-field legend{padding:0;margin-bottom:6px;font-size:.85rem;font-weight:700}
+.driver-zone-options{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.driver-zone-options label{display:flex;align-items:center;justify-content:center;gap:6px;min-height:44px;padding:8px;border:1px solid rgba(128,128,128,.4);border-radius:10px;font-weight:700;cursor:pointer;text-align:center}
+.driver-zone-options label.selected{border-color:#d99a1e;background:#fff4dc;color:#5a3d00}
+.driver-zone-options input{margin:0}
+.driver-pickup-fee-field small{color:#7a6a4f;font-size:.75rem}
+.driver-pickup-fee-note{display:block;font-size:.75rem;color:#7a6a4f}
 
 .driver-report-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
 .driver-report-form label { display: grid; gap: 4px; font-size: 12px; font-weight: 700; color: #604715; }
