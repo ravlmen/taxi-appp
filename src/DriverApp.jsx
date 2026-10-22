@@ -166,12 +166,11 @@ function DriverRideMap({ geometry, pickup, destination }) {
 
 function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance }) {
   const [etaMinutes, setEtaMinutes] = useState('10')
-  const [inPickupZone, setInPickupZone] = useState(null)
   const [pickupFeeCzk, setPickupFeeCzk] = useState('')
   const etaValue = Number(etaMinutes)
-  const feeValue = Number(pickupFeeCzk)
-  const canSubmitOffer = Number.isInteger(etaValue) && etaValue >= 1 && etaValue <= 180
-    && (inPickupZone === true || (inPickupZone === false && Number.isInteger(feeValue) && feeValue >= 1 && feeValue <= 10000))
+  const feeValue = pickupFeeCzk.trim() === '' ? 0 : Number(pickupFeeCzk)
+  const isFeeValid = Number.isInteger(feeValue) && feeValue >= 0 && feeValue <= 10000
+  const canSubmitOffer = Number.isInteger(etaValue) && etaValue >= 1 && etaValue <= 180 && isFeeValid
   const mapsUrl = new URL('https://www.google.com/maps/dir/')
   mapsUrl.searchParams.set('api', '1')
   mapsUrl.searchParams.set('origin', ride.pickup)
@@ -248,35 +247,20 @@ function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance 
               disabled={busy}
             />
           </label>
-          <fieldset className="driver-zone-field" disabled={busy}>
-            <legend>Je nástupní adresa v nástupní zóně?</legend>
-            <div className="driver-zone-options">
-              <label className={inPickupZone === true ? 'selected' : ''}>
-                <input type="radio" name={`zone-${ride.id}`} checked={inPickupZone === true} onChange={() => setInPickupZone(true)} />
-                Ano, v zóně
-              </label>
-              <label className={inPickupZone === false ? 'selected' : ''}>
-                <input type="radio" name={`zone-${ride.id}`} checked={inPickupZone === false} onChange={() => setInPickupZone(false)} />
-                Ne, mimo zónu
-              </label>
-            </div>
-            {inPickupZone === false && (
-              <label className="driver-eta-field driver-pickup-fee-field">
-                <span>Přistavení vozidla (Kč)</span>
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  min="1"
-                  max="10000"
-                  value={pickupFeeCzk}
-                  onChange={(event) => setPickupFeeCzk(event.target.value)}
-                  placeholder="např. 150"
-                  autoFocus
-                />
-                <small>Zákazník uvidí čas a upozornění, že celková cena bude navýšena o tuto částku (po jeho slevě za počet jízd).</small>
-              </label>
-            )}
-          </fieldset>
+          <label className="driver-eta-field driver-pickup-fee-field">
+            <span>Přistavení vozidla (Kč)</span>
+            <input
+              type="number"
+              inputMode="numeric"
+              min="0"
+              max="10000"
+              value={pickupFeeCzk}
+              onChange={(event) => setPickupFeeCzk(event.target.value)}
+              placeholder="0 = v nástupní zóně"
+              disabled={busy}
+            />
+            <small>Vyplňte jen mimo nástupní zónu. Zákazník uvidí upozornění, že celková cena bude navýšena o tuto částku (po jeho slevě za počet jízd).</small>
+          </label>
           <button
             className="driver-secondary-action"
             type="button"
@@ -288,10 +272,10 @@ function RideCard({ ride, assigned = false, busy, onAccept, onReject, onAdvance 
           <button
             className="driver-primary-action"
             type="button"
-            onClick={() => onAccept(ride, Number(etaMinutes), inPickupZone === false ? Number(pickupFeeCzk) : null)}
+            onClick={() => onAccept(ride, Number(etaMinutes), feeValue > 0 ? feeValue : null)}
             disabled={busy || !canSubmitOffer}
           >
-            {busy ? 'Odesílám…' : inPickupZone === false ? 'Přijmout a odeslat čas + přistavení' : 'Přijmout a odeslat čas'}
+            {busy ? 'Odesílám…' : feeValue > 0 ? 'Přijmout a odeslat čas + přistavení' : 'Přijmout a odeslat čas'}
           </button>
         </div>
       )}
