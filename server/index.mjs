@@ -1451,23 +1451,7 @@ app.post('/api/driver/rides/:id/accept', async (request, response) => {
     response.status(409).json({ error: 'Tuto jízdu už nabídl jiný řidič nebo už není volná.' })
     return
   }
-  const driver = driverAccounts.find(({ id }) => id === session.driverId)
-  const totalAmountCzk = ride.amountCzk + (pickupFee?.amountCzk ?? 0)
-  const pickupFeeText = pickupFee
-    ? ` Nástupní adresa je mimo region taxi (Třebechovice pod Orebem, Pohoří u Dobrušky). Přistavení vozidla ${pickupFee.amountCzk} Kč${pickupFee.amountCzk !== pickupFee.originalAmountCzk ? ` po slevě (původně ${pickupFee.originalAmountCzk} Kč)` : ''}, celkem ${totalAmountCzk} Kč.`
-    : ''
-  void pushToCustomer(ride.customerPhone, {
-    title: `Řidič ${driver?.name ?? ''} přijede za ${etaMinutes} min`.replace('  ', ' '),
-    body: `${driver?.carName ? `${driver.carName}. ` : ''}${driver?.plate ? `SPZ ${driver.plate}. ` : ''}${pickupFee ? `Přistavení vozidla ${pickupFee.amountCzk} Kč, celkem ${totalAmountCzk} Kč. ` : ''}Otevřete aplikaci a potvrďte ${pickupFee ? 'nabídku' : 'čas'}.`,
-    tag: `ride-${ride.id}`,
-    url: '/',
-  })
-  const notificationWarning = await notifyBySms(
-    [ride.customerPhone],
-    `Taxi Koblížek: Řidič${driver?.name ? ` ${driver.name}` : ''}${driver?.carName ? `, ${driver.carName}` : ''}${driver?.plate ? `, SPZ ${driver.plate}` : ''} k vám přijede za ${etaMinutes} min.${pickupFeeText} Potvrďte nebo odmítněte to v aplikaci.`,
-    `Nabídka času zákazníkovi k jízdě ${ride.id}`,
-  ) ? null : 'Čas je odeslaný zákazníkovi v aplikaci, ale SMS se nepodařilo odeslat.'
-  response.json({ ride: formatApiRide(ride), notificationWarning })
+  response.json({ ride: formatApiRide(ride), notificationWarning: null })
 })
 
 app.post('/api/driver/rides/:id/reject', async (request, response) => {
